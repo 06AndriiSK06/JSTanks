@@ -1,0 +1,6 @@
+{
+	"name": "Kyiv Proving Ground",
+	"gridSize": 48,
+	"initialAsteroids": 5,
+	"pickupIntervalSec": 10
+}

@@ -1,0 +1,29 @@
+[
+	{
+		"id": "training-range",
+		"name": "Training Range (Standard)",
+		"players": 1,
+		"maxPlayers": 4,
+		"initialAsteroids": 5,
+		"seekerRatio": 3,
+		"difficulty": "Normal"
+	},
+	{
+		"id": "iron-fortress",
+		"name": "Iron Fortress (Heavy Waves)",
+		"players": 2,
+		"maxPlayers": 4,
+		"initialAsteroids": 8,
+		"seekerRatio": 2,
+		"difficulty": "Hard"
+	},
+	{
+		"id": "drone-swarm",
+		"name": "Drone Swarm (Homing Blitz)",
+		"players": 3,
+		"maxPlayers": 4,
+		"initialAsteroids": 7,
+		"seekerRatio": 1,
+		"difficulty": "Insane"
+	}
+]

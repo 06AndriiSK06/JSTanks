@@ -5,13 +5,18 @@ import { Explosion } from "./explosion.js";
 import { Pickup } from "./pickup.js";
 import { Vector2 } from "./vector.js";
 
-export class World {
+export class World extends EventTarget {
 	#entities = new Map();
 	#pendingRemoval = new Set();
 
-	constructor({ arena, input }) {
+	constructor({ arena, input, roomConfig = {} }) {
+		super();
 		this.arena = arena;
 		this.input = input;
+		this.roomName = roomConfig.name ?? "Training Range";
+		this.playerName = roomConfig.playerName ?? "Commander";
+		this.initialAsteroids = roomConfig.initialAsteroids ?? 5;
+		this.seekerRatio = roomConfig.seekerRatio ?? 3;
 		this.score = 0;
 		this.wave = 1;
 		this.pickupTimer = 5.0;
@@ -25,8 +30,23 @@ export class World {
 		return this.#entities.get(id);
 	}
 
+	#emit(type, detail = {}) {
+		this.dispatchEvent(new CustomEvent(type, { detail }));
+	}
+
+	#addScore(points) {
+		this.score += points;
+		this.#emit("scoreChanged", { score: this.score, delta: points });
+	}
+
 	spawn(entity) {
 		this.#entities.set(entity.id, entity);
+		if (entity.kind === "bullet") {
+			this.#emit("fired", {
+				isMissile: entity.isMissile,
+				ownerId: entity.ownerId,
+			});
+		}
 		return entity;
 	}
 
@@ -84,15 +104,15 @@ export class World {
 		return candidate;
 	}
 
-	spawnWave(count = 5) {
+	spawnWave(count = this.initialAsteroids) {
 		const ship = this.ofKind("ship").next().value;
 		const avoidPos = ship
 			? ship.pos
 			: new Vector2(this.arena.width / 2, this.arena.height / 2);
 
 		for (let i = 0; i < count; i += 1) {
-			// Кожен 4-й астероїд — дрон-переслідувач з композиційним компонентом homing
-			const isSeeker = i > 0 && i % 3 === 0;
+			const isSeeker =
+				this.seekerRatio > 0 && i > 0 && i % this.seekerRatio === 0;
 			const homing = isSeeker
 				? createHoming({
 						targetKind: "ship",
@@ -134,7 +154,7 @@ export class World {
 
 		if (this.countKind("asteroid") === 0) {
 			this.wave += 1;
-			this.spawnWave(4 + this.wave);
+			this.spawnWave(this.initialAsteroids + this.wave - 1);
 		}
 
 		this.sweep();
@@ -147,7 +167,6 @@ export class World {
 		const ship = pair.find((e) => e.kind === "ship");
 		const pickup = pair.find((e) => e.kind === "pickup");
 
-		// 1. Снаряд влучив у перешкоду/астероїд
 		if (bullet && asteroid) {
 			this.despawn(bullet.id);
 			this.spawn(
@@ -162,7 +181,8 @@ export class World {
 			const destroyed = asteroid.takeDamage(bullet.damage);
 			if (destroyed) {
 				this.despawn(asteroid.id);
-				this.score += asteroid.size * 100;
+				this.#addScore(asteroid.size * 100);
+				this.#emit("exploded", { kind: "asteroid", size: asteroid.size });
 				this.spawn(
 					new Explosion({
 						pos: asteroid.pos,
@@ -172,7 +192,6 @@ export class World {
 					}),
 				);
 
-				// Ділимо великі уламки на менші
 				if (asteroid.size > 1) {
 					for (let i = 0; i < 2; i += 1) {
 						const offset = Vector2.fromAngle(Math.random() * Math.PI * 2, 14);
@@ -189,11 +208,12 @@ export class World {
 						);
 					}
 				}
+			} else {
+				this.#emit("hit", { kind: "asteroid" });
 			}
 			return;
 		}
 
-		// 2. Танк зіткнувся з перешкодою
 		if (ship && asteroid) {
 			this.despawn(asteroid.id);
 			this.spawn(
@@ -206,6 +226,7 @@ export class World {
 			);
 			const killed = ship.takeDamage(35);
 			if (killed) {
+				this.#emit("exploded", { kind: "ship" });
 				this.spawn(
 					new Explosion({
 						pos: ship.pos,
@@ -214,15 +235,17 @@ export class World {
 						scale: 1.5,
 					}),
 				);
+			} else {
+				this.#emit("hit", { kind: "ship" });
 			}
 			return;
 		}
 
-		// 3. Танк підібрав бонус (pickup)
 		if (ship && pickup) {
 			this.despawn(pickup.id);
 			ship.applyPickup(pickup.pickupType);
-			this.score += 50;
+			this.#addScore(50);
+			this.#emit("pickup", { pickupType: pickup.pickupType });
 			this.spawn(
 				new Explosion({
 					pos: pickup.pos,
