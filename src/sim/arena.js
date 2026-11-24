@@ -1,25 +1,19 @@
-﻿export function createArena(width = 960, height = 640) {
+﻿export function createArena(width, height) {
 	return { width, height };
 }
 
 export function wrapArena(entity, arena) {
-	let wrapped = false;
+	const margin = entity.radius ?? 16;
 
-	if (entity.x < 0) {
-		entity.x += arena.width;
-		wrapped = true;
-	} else if (entity.x >= arena.width) {
-		entity.x -= arena.width;
-		wrapped = true;
+	if (entity.pos.x < -margin) {
+		entity.pos.x = arena.width + margin;
+	} else if (entity.pos.x > arena.width + margin) {
+		entity.pos.x = -margin;
 	}
 
-	if (entity.y < 0) {
-		entity.y += arena.height;
-		wrapped = true;
-	} else if (entity.y >= arena.height) {
-		entity.y -= arena.height;
-		wrapped = true;
+	if (entity.pos.y < -margin) {
+		entity.pos.y = arena.height + margin;
+	} else if (entity.pos.y > arena.height + margin) {
+		entity.pos.y = -margin;
 	}
-
-	return wrapped;
 }

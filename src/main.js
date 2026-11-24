@@ -1,14 +1,10 @@
 ﻿import { createInput } from "./input.js";
 import { createLoop } from "./loop.js";
 import { setupCanvas } from "./render/canvas.js";
-import {
-	drawArena,
-	drawHud,
-	drawShip,
-	interpolateState,
-} from "./render/draw.js";
-import { createArena, wrapArena } from "./sim/arena.js";
-import { cloneShip, createShip, integrate } from "./sim/ship.js";
+import { drawHud, drawWorld } from "./render/draw.js";
+import { createArena } from "./sim/arena.js";
+import { Ship } from "./sim/ship.js";
+import { World } from "./sim/world.js";
 
 const canvas = document.getElementById("game");
 const arena = createArena(window.innerWidth, window.innerHeight);
@@ -19,27 +15,19 @@ const { ctx } = setupCanvas(canvas, (width, height) => {
 });
 
 const input = createInput(window);
-const currentShip = createShip(arena.width / 2, arena.height / 2);
-let previousShip = cloneShip(currentShip);
+const world = new World({ arena, input });
+const ship = world.spawn(new Ship(arena.width / 2, arena.height / 2));
+world.spawnWave(5);
 
 const loop = createLoop({
 	step: 1 / 60,
 	simulate(dt) {
-		previousShip = cloneShip(currentShip);
-		integrate(currentShip, input, dt);
-		wrapArena(currentShip, arena);
+		world.step(dt);
 		input.endStep();
 	},
 	render(alpha) {
-		const interpolatedShip = interpolateState(
-			previousShip,
-			currentShip,
-			alpha,
-			arena,
-		);
-		drawArena(ctx, arena);
-		drawShip(ctx, interpolatedShip);
-		drawHud(ctx, loop.getStats(), currentShip);
+		drawWorld(ctx, world, alpha);
+		drawHud(ctx, loop.getStats(), world, ship);
 	},
 });
 
