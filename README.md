@@ -1,70 +1,76 @@
-# JSTanks — Lab 05: Real-Time Networking: Authoritative Server, Prediction, and Binary Protocols
+# JSTanks — Lab 06: TypeScript: Types for the Protocol, the Simulation, and Both Sides of the Wire
 
 ![JSTanks Two-Player Dogfight](docs/gameplay-lab05.gif)
 
-Мультиплеєрна 2D-гра в реальному часі (`npm workspaces`: `client/`, `server/`, `shared/`) з авторитетним сервером на частоті `30 Hz`, клієнтським передбаченням (`Client-Side Prediction`), серверною звіркою (`Server Reconciliation`), інтерполяцією чужих сутностей (`Entity Interpolation`), бінарним протоколом поверх `ArrayBuffer` / `DataView` (little-endian) та живим діагностичним `Netgraph`-оверлеєм.
+Повністю типізована мультиплеєрна 2D-гра (`npm workspaces`: `shared/`, `server/`, `client/`) під суворим режимом компілятора TypeScript (`strict: true`, `noUncheckedIndexedAccess: true`, `verbatimModuleSyntax: true`). Єдине джерело істини для мережевого протоколу на базі **Zod** (`z.infer`), бінарний протокол `DataView` (little-endian), брендовані ідентифікатори (`EntityId`, `Tick`, `Seq`, `OwnerSlot`), імутабельний `Vector2` (`readonly`) та 100% збережений детермінізм симуляції з Lab 05.
 
-## Структура монорепозиторію (`npm workspaces`)
-
-- `shared/` (`@jstanks/shared`) — спільний детермінований рушій симуляції та бінарний кодек без залежностей від DOM або `node:*`:
-  - `shared/src/sim/rng.js` — детермінований генератор псевдовипадкових чисел `mulberry32` за серверним `seed` (жодного `Math.random()` у симуляції).
-  - `shared/src/sim/entities.js` та `world.js` — фізика кораблів, снарядів, самонавідних ракет, астероїдів і бонусів із фіксованим кроком `dt = 1/30` та серіалізацією стану `toSnapshot()`.
-  - `shared/src/codec/binary.js` — бінарний енкодер/декодер `DataView` (little-endian, байт версії `v = 1`, квантування кута в `Int16` з кроком `0.001` рад).
-  - `shared/test/netcode.test.js` — автоматичні тести детермінізму (1000 кроків → ідентичний хеш стану), round-trip тести `DataView` та бенчмарк `JSON` проти `Binary`.
-- `server/` (`@jstanks/server`) — авторитетний `node:http` + `ws` сервер:
-  - `server/src/rooms.js` — `Room` запускає симуляцію `SharedWorld` на `30 Hz` через точний планувальник абсолютного часу (`nextTick += 1000 / 30; setTimeout(...)`) замість `setInterval`, вимірюючи тривалість тіку та джитер (`GET /api/stats`).
-  - `server/src/ws.js` та `protocol.js` — прийом клієнтських команд `input` (`seq`, `thrust`, `turn`, `fire`, `missile`), валідація діапазонів, вбудований інжектор мережевих затримок (`latencyMs`, `jitterMs`, `dropRate`) та розсилка бінарних знімків з індивідуальним `lastProcessedSeq`.
-- `client/` (`@jstanks/client`) — браузерний клієнт:
-  - `client/src/net/connection.js` — `WebSocket` із `binaryType = "arraybuffer"`, підтримкою прапорця `?codec=json`, виміром `RTT` і пропускної здатності `RX / TX KB/s`.
-  - `client/src/net/predictor.js` — `NetworkSession` із клієнтським передбаченням свого танка, буфером непідтверджених інпутів (`pendingInputs`), звіркою зі знімком сервера, плавним згладжуванням поправки (~100 мс), миттєвими локальними кулями та інтерполяцією чужих сутностей у минулому.
-  - `client/src/net/netgraph.js` — інтерактивний `Netgraph`-оверлей із перемикачами `Prediction`, `Inject Lag (100ms ±30ms, 2% drop)`, `Interp Delay` та `Break Determinism`.
-
-## Запуск проєкту та тестів
+## Перевірка типів, тести та запуск
 
 ```bash
 npm install
-npm test
-npm run build
+npm run typecheck   # tsc --noEmit у shared, server та client (0 помилок, 0 any)
+npm test            # тести детермінізму, Zod-валідації та бінарного DataView
+npm run build       # продакшн-збірка клієнта
 
-# Запуск у режимі розробки (два термінали):
-npm run dev:server
-npm run dev:client
-
-# Порівняння кодеків у браузері:
-# http://localhost:5173/             -> бінарний протокол DataView (за замовчуванням)
-# http://localhost:5173/?codec=json  -> текстовий JSON протокол
+# Режим розробки (два термінали):
+npm run dev:server  # node --import tsx --env-file=.env --watch src/index.ts
+npm run dev:client  # vite
 ```
 
----
-
-## Порівняння форматів: JSON проти Binary (`DataView`) при 30 Hz (4 гравці)
-
-Заміри проведено в `shared/test/netcode.test.js` для повної арени з 4 танками, астероїдами та снарядами на частоті оновлення `30 Hz` (а також підтверджено наживо у `Netgraph`: вхідний потік у бінарному режимі становить `~5.4–5.6 KB/s`, вихідний `input` — `0.40 KB/s`):
-
-| Codec                       | Bytes / snapshot | KB/s per client (down) | KB/s per client (up, 30 input/s) | Encode + decode (µs) |
-| :-------------------------- | :--------------: | :--------------------: | :------------------------------: | :------------------: |
-| **JSON (`TextEncoder`)**    |     `2537 B`     |      `74.33 KB/s`      |    `2.34 KB/s` (~80 B/input)     |      `16.0 µs`       |
-| **Binary (`DataView`, LE)** |     `252 B`      |      `7.38 KB/s`       |     `0.35 KB/s` (12 B/input)     |       `6.1 µs`       |
-
-**Специфікація бінарного кадру знімка (`DataView`, Little-Endian):**
-
-- **Заголовок (12 байт):** `version` (`Uint8`, 1 байт), `msgType = 0x02` (`Uint8`, 1 байт), `serverTick` (`Uint32`, 4 байти), `lastProcessedSeq` (`Uint32`, 4 байти), `entityCount` (`Uint16`, 2 байти).
-- **Запис кожної сутності (24 байти):** `id` (`Uint16`), `kindCode` (`Uint8`), `flags` (`Uint8`), `ownerSlot` (`Uint16`), квантований кут `angle` (`Int16`, `Math.round(angle * 1000)` — точність `0.001` рад ≈ `0.057°` при економії 50% пам'яті порівняно з `Float32`), координати `x, y` (`Float32` × 2), швидкість `vx, vy` (`Int16` × 2), `hp` (`Uint16`) та `score / 10` (`Uint16`).
+CI перевірка типів налаштована у `.github/workflows/typecheck.yml` (`npm ci && npm run typecheck`).
 
 ---
 
-## Архітектурний запис: затримка, узгодженість стану, чіти та вибір затримки інтерполяції
+## Що знайшов TypeScript під час міграції («What TypeScript found»)
 
-### 1. Три фундаментальні проблеми мережевої гри та їх вирішення
+1. **Неперевірений доступ за індексом масиву (`noUncheckedIndexedAccess`):** у `predictor.ts` звернення до буфера знімків `this.snapshotBuffer[0]` та `this.snapshotBuffer[i + 1]` мало потенційний тип `BufferedSnapshot | undefined`. Без явної перевірки `if (!firstSnap || !lastSnap)` доступ до `.receivedAt` міг спричинити `TypeError` при порожньому буфері на старті сесії.
+2. **Небезпечна мутація полів `Vector2`:** у старому JS-коді `breakDeterminism` змінював координати напряму (`this.localShip.pos.x += ...`). Після додавання модифікатора `readonly x: number; readonly y: number` у `Vector2` компілятор заборонив приховану мутацію і змусив створювати новий екземпляр `new Vector2(...)`.
+3. **Неперевірений результат `document.querySelector` / `getElementById`:** при роботі з DOM (`#game`, `#lobby-player-name`) суворий `strictNullChecks` виявив, що елемент може бути `null` або базовим `HTMLElement` без властивості `.value`, тому додано безпечні перевірки `instanceof HTMLCanvasElement` та дженерики `querySelector<HTMLInputElement>(...)`.
+4. **Типізація помилок у блоках `catch (err: unknown)`:** замість неявного `any` у `catch` довелося явно звужувати тип через `err instanceof Error` та `err instanceof DOMException` перед читанням `.name` та `.message` у `loader.ts`, `lobby.ts` і `ws.ts`.
+5. **Вичерпна перевірка всіх варіантів сутностей та повідомлень (`never`):** при розборі `SnapshotEntity` та `ClientMessage` додавання `const _exhaustive: never = msg` у `default`-гілку `switch` гарантує на етапі компіляції, що жоден новий тип повідомлення чи сутності не залишиться без обробника.
 
-1. **Затримка мережі (Latency):** При наївному підході (без передбачення, `Prediction: OFF`) та ввімкненому інжекторі затримки `100 ms ± 30 ms` натискання `W` або `Space` дає реакцію танка лише через повний оборот пакета (`RTT ≈ 100–200 ms`), що робить керування «ватним». Увімкнення **Client-Side Prediction** усуває затримку керування для локального гравця: `SimShip.applyInput()` миттєво просуває власний танк і спавнить локальну кулю на клієнті, тоді як сервер підтверджує їх асинхронно.
-2. **Узгодженість стану (Consistency) та експеримент із порушенням детермінізму:** Щоб клієнт і сервер отримували однакові координати з однакових `input`, вся симуляція в `shared/` є строго детермінованою (фіксований `dt = 1/30`, генератор `mulberry32(seed)`). Під час перевірки без затримки (`RTT = 1.5 ms`) та з лагом (`100 ms ± 30 ms`) величина поправки звірки (`Reconcile Correction`) у відкритому космосі становить **`0.00 px`**. Коли ми навмисно ввімкнули **`Break Determinism: ON`** (додавши `Math.random()` в інтеграцію позиції клієнта), клієнт і сервер почали розходитися на кожному тіку, а `Reconcile Correction` стрибнула до `10–25+ px`, змушуючи алгоритм звірки постійно відкочувати та згладжувати позицію.
-3. **Захист від чітів (Authoritative Server):** Клієнт ніколи не надсилає власні координати `x, y` або факт влучання — лише наміри керування (`thrust`, `turn`, `fire`, `missile`). Сервер перевіряє межі значень у `protocol.js` (спроба надіслати `thrust: 5` негайно закриває сокет із кодом `1008`), застосовує token-bucket rate limit та самостійно обчислює колізії, ушкодження й очки.
+---
 
-### 2. Вибір затримки інтерполяції (`interpolationDelay = 75 ms`)
+## Три найцікавіші типи в проєкті (простими словами)
 
-Оскільки сервер розсилає знімки 30 разів на секунду (інтервал між знімками становить `1000 / 30 ≈ 33.3 ms`), рендеринг чужих кораблів без буферизації створює помітне посмикування (`30 Hz stutter` на моніторі `144 Hz`).
+### 1. Branded-типи для ідентифікаторів (`EntityId`, `Tick`, `Seq`, `OwnerSlot`)
 
-- Якщо обрати `0 ms`, при найменшому джитері мережі наступний знімок ще не прийде, і чужі танки зупинятимуться або екстраполюватимуться з помилками.
-- Якщо обрати занадто велике значення (`120–150 ms`), рух буде ідеально плавним, але гравець бачитиме суперника занадто далеко в минулому.
-- Обране значення **`75 ms` (`~2.25` інтервалу знімків сервера)** є оптимальним компромісом: у буфері майже завжди є два сусідні знімки навіть при втраті 1 пакета (`2% drop`) і джитері `±30 ms`, що забезпечує плавну інтерполяцію чужих танків на `144 fps` при мінімальному візуальному відставанні.
+```ts
+export type EntityId = number & { readonly __brand: "EntityId" };
+export type Tick = number & { readonly __brand: "Tick" };
+export type Seq = number & { readonly __brand: "Seq" };
+```
+
+**Простими словами:** У звичайному JS і номер тіку сервера (`Tick`), і номер команди гравця (`Seq`), і ID танка (`EntityId`) — це просто числа (`number`). Можна випадково передати `tick` замість `seq` у `toSnapshot(tick)` — і програма мовчки зламає звірку координат. Branded-тип додає до числа віртуальну «бірку» (`__brand`), яка існує лише під час перевірки компілятором (у рантаймі це звичайне число без жодних накладних витрат), тому переплутати їх тепер неможливо.
+
+### 2. Дискриміновані об'єднання з вичерпним `switch` (`ClientMessage` та `SnapshotEntity`)
+
+```ts
+export type SnapshotEntity =
+  | ShipSnapshotEntity // { kind: "ship"; ... }
+  | BulletSnapshotEntity // { kind: "bullet"; ... }
+  | AsteroidSnapshotEntity // { kind: "asteroid"; ... }
+  | PickupSnapshotEntity; // { kind: "pickup"; ... }
+```
+
+**Простими словами:** Усі варіанти сутностей мають спільне поле-мітку `kind` з точним літеральним значенням. Коли ми пишемо `switch (entity.kind)`, TypeScript автоматично розуміє, які саме поля доступні в кожній гілці `case`, а рядок `const _exhaustive: never = entity;` у `default` змусить компілятор видати помилку, якщо ми колись додамо новий вид сутності (наприклад, `"mine"`), але забудемо додати її рендер.
+
+### 3. Узагальнена типізована шина подій (`Bus<E extends Record<string, unknown>>`)
+
+```ts
+export class Bus<E extends Record<string, unknown>> {
+  on<K extends keyof E>(name: K, fn: (payload: E[K]) => void): () => void { ... }
+  emit<K extends keyof E>(name: K, payload: E[K]): void { ... }
+}
+```
+
+**Простими словами:** `E` — це словник усіх подій модуля (наприклад, `{ chat: { name: string; text: string }; roster: { players: ... } }`). Конструкція `K extends keyof E` обмежує назву події лише існуючими ключами словника, а `E[K]` автоматично підставляє точний тип даних для цієї події. Якщо спробувати відправити подію `"chat"` із полем `count: 5` замість `text: "..."`, компілятор одразу зупинить збірку.
+
+---
+
+## Архітектурне рішення щодо UI-фреймворку (Lobby, Roster/Chat та HUD)
+
+Для лобі, чату кімнати та діагностичного `Netgraph` ми свідомо залишили **чистий типізований TypeScript без важких UI-фреймворків (React / Vue / Svelte)**, побудувавши реактивні оновлення поверх нашої типізованої шини `Bus<LobbyEvents>` та `Bus<ConnectionEvents>`:
+
+- **Чому не брали фреймворк:** основне навантаження інтерфейсу відбувається на `Canvas 2D` зі швидкістю 60–144 кадрів/с, а поверх нього рендеряться лише 3 компактні панелі (лобі, чат кімнати та Netgraph).
+- **Що виграли:** продакшн-бандл клієнта важить лише **~96 KB (~26 KB gzip)** без додаткового runtime-шару Virtual DOM чи реактивних сигналів, час збірки Vite становить **~100 мс**, а підписки через `Bus<E>` дають повну типобезпеку подій без зайвих залежностей.
