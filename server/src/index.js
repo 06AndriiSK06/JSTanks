@@ -80,7 +80,6 @@ async function serveStatic(distDir, pathname, res) {
 		fileStat = await stat(resolvedPath);
 		if (!fileStat.isFile()) throw new Error("Not a file");
 	} catch {
-		// Fallback на index.html для SPA або 404 для ассетів
 		if (path.extname(resolvedPath)) {
 			sendJson(res, 404, { error: "Asset not found" });
 			return;
@@ -136,6 +135,15 @@ const server = http.createServer(async (req, res) => {
 			return;
 		}
 
+		if (req.method === "GET" && pathname === "/api/stats") {
+			sendJson(res, 200, {
+				uptimeSec: Math.round(process.uptime()),
+				rssMb: Number((process.memoryUsage().rss / (1024 * 1024)).toFixed(1)),
+				rooms: roomManager.getStats(),
+			});
+			return;
+		}
+
 		if (req.method === "GET" && pathname === "/api/rooms") {
 			sendJson(res, 200, roomManager.listRooms());
 			return;
@@ -176,11 +184,10 @@ const server = http.createServer(async (req, res) => {
 			return;
 		}
 
-		// Діагностичний ендпоінт для демонстрації блокування Event Loop на 300 мс (M4)
 		if (req.method === "GET" && pathname === "/api/slow") {
 			const start = performance.now();
 			while (performance.now() - start < 300) {
-				// Навмисне синхронне блокування потоку на 300 мс
+				// Синхронне блокування для тестування Event Loop
 			}
 			sendJson(res, 200, { blockedMs: Math.round(performance.now() - start) });
 			return;
@@ -204,12 +211,10 @@ const wsControl = attachWebSocketServer({ server, roomManager, config });
 
 server.listen(config.port, config.host, () => {
 	console.log(
-		`[JSTanks Server] Listening on http://${config.host}:${config.port}`,
+		`[JSTanks Server] Authoritative 30Hz server on http://${config.host}:${config.port}`,
 	);
-	console.log(`[JSTanks Server] Match logs directory: ${config.logDir}`);
 });
 
-// Graceful shutdown на SIGINT / SIGTERM
 let shuttingDown = false;
 async function shutdown(signal) {
 	if (shuttingDown) return;

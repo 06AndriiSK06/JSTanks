@@ -1,0 +1,11 @@
+﻿{
+	"name": "@jstanks/shared",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"exports": {
+		".": "./src/index.js",
+		"./sim": "./src/sim/index.js",
+		"./codec": "./src/codec/binary.js"
+	}
+}

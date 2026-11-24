@@ -6,15 +6,15 @@ import { Lobby } from "./lobby/lobby.js";
 import { mountLobbyView } from "./lobby/lobbyView.js";
 import { createLoop } from "./loop.js";
 import { GameConnection } from "./net/connection.js";
+import { mountNetgraphView } from "./net/netgraph.js";
+import { NetworkSession } from "./net/predictor.js";
 import { setupCanvas } from "./render/canvas.js";
 import {
 	createHudRenderer,
 	drawLoadingScreen,
-	drawWorld,
+	drawMultiplayerWorld,
 } from "./render/draw.js";
 import { createArena } from "./sim/arena.js";
-import { Ship } from "./sim/ship.js";
-import { World } from "./sim/world.js";
 
 const canvas = document.getElementById("game");
 const arena = createArena(window.innerWidth, window.innerHeight);
@@ -27,11 +27,14 @@ const { ctx } = setupCanvas(canvas, (width, height) => {
 const params = new URLSearchParams(window.location.search);
 const failMode = params.get("fail");
 const sequentialMode = params.get("mode") === "seq";
+const codecMode = params.get("codec") === "json" ? "json" : "binary";
 
 const audio = createAudioEngine();
 const hud = createHudRenderer();
-const connection = new GameConnection();
+const connection = new GameConnection({ codec: codecMode });
+const session = new NetworkSession({ arenaWidth: 1200, arenaHeight: 760 });
 const chatView = mountRoomChatView(connection);
+const netgraphView = mountNetgraphView({ connection, session });
 
 const loadingState = {
 	done: 0,
@@ -45,33 +48,67 @@ const loadingState = {
 
 let screenMode = "loading";
 let loadedAssets = null;
-let world = null;
-let ship = null;
+let currentRoomName = "Arena";
 const rawInput = createInput(window);
 
-// Блокуємо ігрові клавіші (WASD / Space / E), поки гравець друкує повідомлення в чаті
-const input = {
-	isDown(code) {
-		return chatView.isTyping() ? false : rawInput.isDown(code);
-	},
-	justPressed(code) {
-		return chatView.isTyping() ? false : rawInput.justPressed(code);
-	},
-	endStep() {
-		rawInput.endStep();
-	},
-};
+function readControls() {
+	if (chatView.isTyping()) {
+		return { thrust: 0, turn: 0, fire: false, missile: false };
+	}
+	const forward = rawInput.isDown("KeyW") || rawInput.isDown("ArrowUp") ? 1 : 0;
+	const backward =
+		rawInput.isDown("KeyS") || rawInput.isDown("ArrowDown") ? 1 : 0;
+	const left = rawInput.isDown("KeyA") || rawInput.isDown("ArrowLeft") ? 1 : 0;
+	const right =
+		rawInput.isDown("KeyD") || rawInput.isDown("ArrowRight") ? 1 : 0;
 
-function startBattle(roomConfig) {
-	arena.gridSize = loadedAssets?.arenaConfig?.gridSize ?? 48;
-	world = new World({ arena, input, roomConfig });
-	ship = world.spawn(new Ship(arena.width / 2, arena.height / 2));
-	world.spawnWave(roomConfig.initialAsteroids ?? 5);
+	return {
+		thrust: forward - backward,
+		turn: right - left,
+		fire: rawInput.isDown("Space") || rawInput.isDown("KeyF"),
+		missile: rawInput.justPressed("KeyE") || rawInput.justPressed("ShiftLeft"),
+	};
+}
 
-	audio.bindWorld(world);
-	hud.bindWorld(world);
+connection.addEventListener("welcome", (e) => {
+	session.setIdentity({
+		playerId: e.detail.playerId,
+		ownerSlot: e.detail.ownerSlot,
+		roster: e.detail.players,
+		arena: e.detail.room?.arena,
+	});
+});
 
+connection.addEventListener("roster", (e) => {
+	session.updateRoster(e.detail.players);
+});
+
+connection.addEventListener("snapshot", (e) => {
+	session.onSnapshot(e.detail);
+});
+
+connection.addEventListener("gameEvent", (e) => {
+	const ev = e.detail.event;
+	if (!ev) return;
+	if (ev.type === "fired") {
+		audio.play("shoot", {
+			volume: ev.isMissile ? 0.75 : 0.45,
+			rate: ev.isMissile ? 0.75 : 1.05,
+		});
+	} else if (ev.type === "hit") {
+		audio.play("hit", { volume: 0.45 });
+	} else if (ev.type === "exploded") {
+		audio.play("explosion", { volume: ev.kind === "ship" ? 0.9 : 0.65 });
+	} else if (ev.type === "pickup") {
+		audio.play("pickup", { volume: 0.6 });
+	}
+});
+
+function startMultiplayerBattle(roomConfig) {
+	currentRoomName = roomConfig.name ?? "Arena";
 	chatView.show();
+	netgraphView.show();
+
 	connection.connect({
 		room: roomConfig.id,
 		name: roomConfig.playerName,
@@ -92,7 +129,7 @@ function openLobby() {
 	const view = mountLobbyView(lobby);
 
 	lobby.addEventListener("join", (e) => {
-		startBattle(e.detail.room);
+		startMultiplayerBattle(e.detail.room);
 	});
 
 	view.show();
@@ -139,10 +176,9 @@ async function runAssetPipeline() {
 		});
 
 		loadingState.elapsedMs = loadedAssets.elapsedMs;
-		loadingState.label = `Ready! Loaded in ${loadedAssets.elapsedMs.toFixed(1)} ms`;
 		audio.setBuffers(loadedAssets.sounds);
 
-		await new Promise((r) => setTimeout(r, 300));
+		await new Promise((r) => setTimeout(r, 250));
 		openLobby();
 	} catch (err) {
 		console.error("[AssetPipeline Failure]", err);
@@ -172,19 +208,22 @@ canvas.addEventListener("click", () => {
 });
 
 const loop = createLoop({
-	step: 1 / 60,
+	step: 1 / 30,
 	simulate(dt) {
-		if (screenMode === "playing" && world) {
-			world.step(dt);
+		if (screenMode === "playing") {
+			const controls = readControls();
+			const inputPacket = session.stepLocalPrediction(dt, controls);
+			connection.sendInput(inputPacket);
 		}
-		input.endStep();
+		rawInput.endStep();
 	},
-	render(alpha) {
+	render() {
 		if (screenMode === "loading") {
 			drawLoadingScreen(ctx, arena, loadingState);
-		} else if (screenMode === "playing" && world && ship) {
-			drawWorld(ctx, world, alpha, loadedAssets);
-			hud.draw(ctx, loop.getStats(), world, ship, audio);
+		} else if (screenMode === "playing") {
+			const entities = session.getRenderEntities();
+			drawMultiplayerWorld(ctx, arena, session.arena, entities, loadedAssets);
+			hud.draw(ctx, loop.getStats(), currentRoomName, session.localShip, audio);
 		}
 	},
 });

@@ -1,7 +1,7 @@
 ﻿{
 	"name": "@jstanks/server",
 	"private": true,
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"type": "module",
 	"scripts": {
 		"start": "node --env-file=.env src/index.js",
@@ -9,6 +9,7 @@
 		"bench:rss": "node test/backpressure-bench.js"
 	},
 	"dependencies": {
+		"@jstanks/shared": "*",
 		"ws": "^8.18.0"
 	}
 }

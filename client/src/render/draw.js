@@ -1,32 +1,4 @@
-﻿function lerp(a, b, t) {
-	return a + (b - a) * t;
-}
-
-function lerpAngle(a, b, t) {
-	let diff = b - a;
-	while (diff > Math.PI) diff -= Math.PI * 2;
-	while (diff < -Math.PI) diff += Math.PI * 2;
-	return a + diff * t;
-}
-
-export function getInterpolatedPose(entity, alpha, arena) {
-	const dx = Math.abs(entity.pos.x - entity.prevPos.x);
-	const dy = Math.abs(entity.pos.y - entity.prevPos.y);
-
-	const x =
-		dx > arena.width * 0.5
-			? entity.pos.x
-			: lerp(entity.prevPos.x, entity.pos.x, alpha);
-	const y =
-		dy > arena.height * 0.5
-			? entity.pos.y
-			: lerp(entity.prevPos.y, entity.pos.y, alpha);
-	const angle = lerpAngle(entity.prevAngle, entity.angle, alpha);
-
-	return { x, y, angle };
-}
-
-export function drawLoadingScreen(ctx, arena, state) {
+﻿export function drawLoadingScreen(ctx, arena, state) {
 	ctx.fillStyle = "#0f172a";
 	ctx.fillRect(0, 0, arena.width, arena.height);
 
@@ -81,40 +53,12 @@ export function drawLoadingScreen(ctx, arena, state) {
 		ctx.fillText(`ERROR: ${state.error}`, cx, cy + 38);
 		ctx.fillStyle = "#fde047";
 		ctx.fillText(
-			"Click anywhere or press [R] to RETRY (or [Enter] to continue degraded)",
+			"Click anywhere or press [R] to RETRY (or [Enter] to continue)",
 			cx,
 			cy + 62,
 		);
-	} else if (state.elapsedMs != null) {
-		ctx.fillStyle = "#4ade80";
-		ctx.font = "12px monospace";
-		ctx.fillText(
-			`Loaded (${state.mode}) in ${state.elapsedMs.toFixed(1)} ms`,
-			cx,
-			cy + 36,
-		);
 	}
 	ctx.restore();
-}
-
-export function drawArena(ctx, arena) {
-	ctx.fillStyle = "#0f172a";
-	ctx.fillRect(0, 0, arena.width, arena.height);
-
-	ctx.strokeStyle = "rgba(148, 163, 184, 0.08)";
-	ctx.lineWidth = 1;
-	const gridSize = arena.gridSize ?? 48;
-
-	ctx.beginPath();
-	for (let x = 0; x <= arena.width; x += gridSize) {
-		ctx.moveTo(x, 0);
-		ctx.lineTo(x, arena.height);
-	}
-	for (let y = 0; y <= arena.height; y += gridSize) {
-		ctx.moveTo(0, y);
-		ctx.lineTo(arena.width, y);
-	}
-	ctx.stroke();
 }
 
 function drawSpriteFrame(ctx, assets, frameKey, size) {
@@ -137,241 +81,185 @@ function drawSpriteFrame(ctx, assets, frameKey, size) {
 	return true;
 }
 
-export function drawShip(ctx, ship, pose, assets) {
-	if (!ship.isSpawned()) return;
+export function drawMultiplayerWorld(
+	ctx,
+	canvasArena,
+	simArena,
+	entities,
+	assets,
+) {
+	ctx.fillStyle = "#0f172a";
+	ctx.fillRect(0, 0, canvasArena.width, canvasArena.height);
+
+	const offsetX = Math.floor((canvasArena.width - simArena.width) / 2);
+	const offsetY = Math.floor((canvasArena.height - simArena.height) / 2);
 
 	ctx.save();
-	ctx.translate(pose.x, pose.y);
+	ctx.translate(offsetX, offsetY);
 
-	if (ship.shieldTimer > 0) {
-		ctx.beginPath();
-		ctx.arc(0, 0, ship.radius + 9, 0, Math.PI * 2);
-		ctx.strokeStyle = "rgba(56, 189, 248, 0.75)";
-		ctx.lineWidth = 2.5;
-		ctx.stroke();
-		ctx.fillStyle = "rgba(56, 189, 248, 0.12)";
-		ctx.fill();
-	}
-
-	ctx.rotate(pose.angle);
-
-	if (ship.thrusting) {
-		ctx.fillStyle = "#f97316";
-		ctx.beginPath();
-		ctx.moveTo(-20, -6);
-		ctx.lineTo(-31 - Math.random() * 6, 0);
-		ctx.lineTo(-20, 6);
-		ctx.closePath();
-		ctx.fill();
-	}
-
-	const frameKey = ship.rapidFireTimer > 0 ? "shipRapid" : "ship";
-	const drawn = drawSpriteFrame(ctx, assets, frameKey, 56);
-
-	if (!drawn) {
-		ctx.fillStyle = "#334155";
-		ctx.fillRect(-20, -16, 40, 6);
-		ctx.fillRect(-20, 10, 40, 6);
-		ctx.fillStyle = ship.rapidFireTimer > 0 ? "#a855f7" : "#22c55e";
-		ctx.fillRect(-16, -11, 32, 22);
-		ctx.fillStyle = "#94a3b8";
-		ctx.fillRect(4, -3, 22, 6);
-	}
-
-	ctx.restore();
-}
-
-export function drawBullet(ctx, bullet, pose, assets) {
-	ctx.save();
-	ctx.translate(pose.x, pose.y);
-	ctx.rotate(pose.angle);
-
-	const frameKey = bullet.isMissile ? "missile" : "bullet";
-	const spriteSize = bullet.isMissile ? 34 : 24;
-	const drawn = drawSpriteFrame(ctx, assets, frameKey, spriteSize);
-
-	if (!drawn) {
-		ctx.fillStyle = bullet.isMissile ? "#f43f5e" : "#38bdf8";
-		ctx.beginPath();
-		ctx.arc(0, 0, bullet.radius, 0, Math.PI * 2);
-		ctx.fill();
-	}
-
-	ctx.restore();
-}
-
-export function drawAsteroid(ctx, asteroid, pose, assets) {
-	ctx.save();
-	ctx.translate(pose.x, pose.y);
-	ctx.rotate(pose.angle);
-
-	const frameKey = asteroid.homing ? "asteroidSeeker" : "asteroid";
-	const spriteSize = asteroid.radius * 2.55;
-	const drawn = drawSpriteFrame(ctx, assets, frameKey, spriteSize);
-
-	if (!drawn) {
-		ctx.beginPath();
-		asteroid.vertices.forEach((v, idx) => {
-			const vx = Math.cos(v.angle) * v.dist;
-			const vy = Math.sin(v.angle) * v.dist;
-			if (idx === 0) ctx.moveTo(vx, vy);
-			else ctx.lineTo(vx, vy);
-		});
-		ctx.closePath();
-		ctx.fillStyle = asteroid.homing ? "#3f1d2e" : "#1e293b";
-		ctx.strokeStyle = asteroid.homing ? "#f43f5e" : "#94a3b8";
-		ctx.lineWidth = 2;
-		ctx.fill();
-		ctx.stroke();
-	}
-
-	ctx.restore();
-}
-
-export function drawPickup(ctx, pickup) {
-	const bob = Math.sin(pickup.pulse) * 2.5;
-	const isShield = pickup.pickupType === "shield";
-
-	ctx.save();
-	ctx.translate(pickup.pos.x, pickup.pos.y);
-
-	ctx.beginPath();
-	ctx.arc(0, 0, pickup.radius + bob, 0, Math.PI * 2);
-	ctx.fillStyle = isShield
-		? "rgba(56, 189, 248, 0.18)"
-		: "rgba(168, 85, 247, 0.18)";
-	ctx.strokeStyle = isShield ? "#38bdf8" : "#a855f7";
+	ctx.fillStyle = "#0b1222";
+	ctx.fillRect(0, 0, simArena.width, simArena.height);
+	ctx.strokeStyle = "#334155";
 	ctx.lineWidth = 2;
-	ctx.fill();
+	ctx.strokeRect(0, 0, simArena.width, simArena.height);
+
+	ctx.strokeStyle = "rgba(148, 163, 184, 0.08)";
+	ctx.lineWidth = 1;
+	ctx.beginPath();
+	for (let x = 0; x <= simArena.width; x += 48) {
+		ctx.moveTo(x, 0);
+		ctx.lineTo(x, simArena.height);
+	}
+	for (let y = 0; y <= simArena.height; y += 48) {
+		ctx.moveTo(0, y);
+		ctx.lineTo(simArena.width, y);
+	}
 	ctx.stroke();
 
-	ctx.fillStyle = "#f8fafc";
-	ctx.font = "bold 12px monospace";
-	ctx.textAlign = "center";
-	ctx.textBaseline = "middle";
-	ctx.fillText(isShield ? "+HP" : "2X", 0, 0);
+	for (const e of entities) {
+		if (e.kind === "pickup") {
+			const isShield = e.pickupType === "shield";
+			ctx.save();
+			ctx.translate(e.x, e.y);
+			ctx.beginPath();
+			ctx.arc(0, 0, 15, 0, Math.PI * 2);
+			ctx.fillStyle = isShield
+				? "rgba(56, 189, 248, 0.2)"
+				: "rgba(168, 85, 247, 0.2)";
+			ctx.strokeStyle = isShield ? "#38bdf8" : "#a855f7";
+			ctx.lineWidth = 2;
+			ctx.fill();
+			ctx.stroke();
+			ctx.fillStyle = "#f8fafc";
+			ctx.font = "bold 11px monospace";
+			ctx.textAlign = "center";
+			ctx.textBaseline = "middle";
+			ctx.fillText(isShield ? "+HP" : "2X", 0, 0);
+			ctx.restore();
+			continue;
+		}
 
-	ctx.restore();
-}
+		if (e.kind === "asteroid") {
+			const radius = e.size === 2 ? 26 : 15;
+			ctx.save();
+			ctx.translate(e.x, e.y);
+			ctx.rotate(e.angle);
+			const frameKey = e.isSeeker ? "asteroidSeeker" : "asteroid";
+			if (!drawSpriteFrame(ctx, assets, frameKey, radius * 2.55)) {
+				ctx.fillStyle = e.isSeeker ? "#3f1d2e" : "#1e293b";
+				ctx.strokeStyle = e.isSeeker ? "#f43f5e" : "#94a3b8";
+				ctx.beginPath();
+				ctx.arc(0, 0, radius, 0, Math.PI * 2);
+				ctx.fill();
+				ctx.stroke();
+			}
+			ctx.restore();
+			continue;
+		}
 
-export function drawExplosion(ctx, explosion) {
-	const alpha = Math.max(0, explosion.ttl / explosion.maxTtl);
-	ctx.save();
-	ctx.globalAlpha = alpha;
-	for (const p of explosion.particles) {
-		ctx.fillStyle = p.color;
-		ctx.beginPath();
-		ctx.arc(
-			explosion.pos.x + p.offset.x,
-			explosion.pos.y + p.offset.y,
-			p.size * alpha,
-			0,
-			Math.PI * 2,
-		);
-		ctx.fill();
-	}
-	ctx.restore();
-}
+		if (e.kind === "bullet") {
+			ctx.save();
+			ctx.translate(e.x, e.y);
+			ctx.rotate(e.angle);
+			const frameKey = e.isMissile ? "missile" : "bullet";
+			const size = e.isMissile ? 32 : 22;
+			if (!drawSpriteFrame(ctx, assets, frameKey, size)) {
+				ctx.fillStyle = e.isMissile ? "#f43f5e" : "#38bdf8";
+				ctx.beginPath();
+				ctx.arc(0, 0, 4, 0, Math.PI * 2);
+				ctx.fill();
+			}
+			ctx.restore();
+			continue;
+		}
 
-export function drawWorld(ctx, world, alpha, assets) {
-	drawArena(ctx, world.arena);
+		if (e.kind === "ship" && e.isSpawned) {
+			ctx.save();
+			ctx.translate(e.x, e.y);
 
-	for (const entity of world) {
-		if (!entity.alive) continue;
-		const pose = getInterpolatedPose(entity, alpha, world.arena);
+			if (e.shieldTimer > 0) {
+				ctx.beginPath();
+				ctx.arc(0, 0, 26, 0, Math.PI * 2);
+				ctx.strokeStyle = "rgba(56, 189, 248, 0.8)";
+				ctx.lineWidth = 2.5;
+				ctx.stroke();
+			}
 
-		switch (entity.kind) {
-			case "pickup":
-				drawPickup(ctx, entity);
-				break;
-			case "asteroid":
-				drawAsteroid(ctx, entity, pose, assets);
-				break;
-			case "bullet":
-				drawBullet(ctx, entity, pose, assets);
-				break;
-			case "ship":
-				drawShip(ctx, entity, pose, assets);
-				break;
-			case "explosion":
-				drawExplosion(ctx, entity);
-				break;
-			default:
-				break;
+			ctx.font = "bold 12px monospace";
+			ctx.textAlign = "center";
+			ctx.fillStyle = e.isLocal ? "#4ade80" : "#38bdf8";
+			ctx.fillText(`${e.name} [${e.hp}]`, 0, -28);
+
+			ctx.rotate(e.angle);
+			if (e.thrusting) {
+				ctx.fillStyle = "#f97316";
+				ctx.beginPath();
+				ctx.moveTo(-20, -6);
+				ctx.lineTo(-32, 0);
+				ctx.lineTo(-20, 6);
+				ctx.closePath();
+				ctx.fill();
+			}
+
+			const frameKey =
+				!e.isLocal || e.rapidFireTimer > 0 ? "shipRapid" : "ship";
+			if (!drawSpriteFrame(ctx, assets, frameKey, 54)) {
+				ctx.fillStyle = e.isLocal ? "#22c55e" : "#a855f7";
+				ctx.fillRect(-16, -11, 32, 22);
+			}
+
+			ctx.restore();
 		}
 	}
+
+	ctx.restore();
 }
 
 export function createHudRenderer() {
-	let scoreFlashTimer = 0;
-	let lastDelta = 0;
-
 	return {
-		bindWorld(world) {
-			world.addEventListener("scoreChanged", (e) => {
-				scoreFlashTimer = 0.8;
-				lastDelta = e.detail?.delta ?? 0;
-			});
-		},
-		draw(ctx, stats, world, ship, audio) {
-			if (scoreFlashTimer > 0) {
-				scoreFlashTimer = Math.max(0, scoreFlashTimer - 1 / 60);
-			}
-
+		draw(ctx, stats, roomName, localShip, audio) {
 			ctx.save();
-			ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
+			ctx.fillStyle = "rgba(15, 23, 42, 0.84)";
 			ctx.strokeStyle = "rgba(148, 163, 184, 0.25)";
 			ctx.lineWidth = 1;
 			ctx.beginPath();
-			ctx.roundRect(14, 14, 390, 148, 8);
+			ctx.roundRect(14, 14, 380, 126, 8);
 			ctx.fill();
 			ctx.stroke();
 
 			ctx.font = "13px monospace";
 			ctx.fillStyle = "#38bdf8";
-			ctx.fillText(
-				`PILOT: ${world.playerName} | ROOM: ${world.roomName}`,
-				26,
-				36,
-			);
+			ctx.fillText(`ROOM: ${roomName}`, 26, 36);
 
+			const score = localShip?.score ?? 0;
+			const hp = localShip?.hp ?? 100;
 			ctx.fillStyle = "#e2e8f0";
-			const deltaStr = scoreFlashTimer > 0 ? ` (+${lastDelta})` : "";
 			ctx.fillText(
-				`SCORE: ${world.score}${deltaStr}   WAVE: ${world.wave}`,
+				`PILOT: ${localShip?.name ?? "Connecting..."} | SCORE: ${score}`,
 				26,
 				58,
 			);
 
-			const hpText = ship.isSpawned()
-				? `HP: ${ship.hp} / ${ship.maxHp}`
-				: `RESPAWN IN ${ship.respawnTimer.toFixed(1)}s`;
-			ctx.fillStyle = ship.hp > 40 ? "#4ade80" : "#f87171";
-			ctx.fillText(hpText, 26, 80);
-
-			const buffs = [];
-			if (ship.shieldTimer > 0)
-				buffs.push(`SHIELD ${ship.shieldTimer.toFixed(1)}s`);
-			if (ship.rapidFireTimer > 0)
-				buffs.push(`RAPID ${ship.rapidFireTimer.toFixed(1)}s`);
-			ctx.fillStyle = "#a855f7";
+			ctx.fillStyle = hp > 40 ? "#4ade80" : "#f87171";
 			ctx.fillText(
-				buffs.length > 0 ? `BUFFS: ${buffs.join(" | ")}` : "BUFFS: NONE",
+				localShip && !localShip.isSpawned()
+					? "STATUS: RESPAWNING..."
+					: `ARMOR HP: ${hp} / 100`,
 				26,
-				102,
+				80,
 			);
 
 			ctx.fillStyle = "#94a3b8";
 			const muteLabel = audio?.isMuted() ? "MUTED [M]" : "AUDIO ON [M]";
 			ctx.fillText(
-				`${stats.stepsPerSec} Hz | ${stats.framesPerSec} fps | ${muteLabel}`,
+				`Render: ${stats.framesPerSec} fps | Server: 30 Hz | ${muteLabel}`,
 				26,
-				124,
+				102,
 			);
 			ctx.fillText(
-				"WASD: drive | Space: cannon | E: homing | M: mute",
+				"WASD: drive | Space: fire | E: missile | Enter: chat",
 				26,
-				144,
+				122,
 			);
 			ctx.restore();
 		},

@@ -1,4 +1,5 @@
 ﻿import { randomUUID } from "node:crypto";
+import { encodeSnapshotBinary } from "@jstanks/shared";
 import { WebSocket, WebSocketServer } from "ws";
 import { encodeMessage, validateIncomingMessage } from "./protocol.js";
 
@@ -9,14 +10,37 @@ export function attachWebSocketServer({ server, roomManager, config }) {
 		maxPayload: config.maxPayloadBytes,
 	});
 
+	const netSim = {
+		latencyMs: Number(process.env.SIM_LATENCY_MS) || 0,
+		jitterMs: Number(process.env.SIM_JITTER_MS) || 0,
+		dropRate: Number(process.env.SIM_DROP_RATE) || 0,
+	};
+
+	function deliverWithNetSim(fn, { bypassDrop = false } = {}) {
+		if (!bypassDrop && netSim.dropRate > 0 && Math.random() < netSim.dropRate) {
+			return;
+		}
+		const jitter =
+			netSim.jitterMs > 0 ? (Math.random() * 2 - 1) * netSim.jitterMs : 0;
+		const delay = Math.max(0, netSim.latencyMs + jitter);
+		if (delay <= 0) {
+			fn();
+		} else {
+			setTimeout(fn, delay);
+		}
+	}
+
 	wss.on("error", (err) => {
 		console.error("[WSS error]", err);
 	});
 
-	function safeSend(socket, data, { critical = true } = {}) {
+	function safeSend(
+		socket,
+		data,
+		{ critical = true, bypassNetSim = false } = {},
+	) {
 		if (socket.readyState !== WebSocket.OPEN) return false;
 
-		// Політика повільного клієнта (backpressure): не переповнюємо буфер некритичними повідомленнями
 		if (!critical && socket.bufferedAmount > config.bufferedAmountLimitBytes) {
 			return false;
 		}
@@ -26,7 +50,21 @@ export function attachWebSocketServer({ server, roomManager, config }) {
 			return false;
 		}
 
-		socket.send(data);
+		if (
+			bypassNetSim ||
+			(netSim.latencyMs === 0 && netSim.jitterMs === 0 && netSim.dropRate === 0)
+		) {
+			socket.send(data);
+		} else {
+			deliverWithNetSim(
+				() => {
+					if (socket.readyState === WebSocket.OPEN) {
+						socket.send(data);
+					}
+				},
+				{ bypassDrop: critical },
+			);
+		}
 		return true;
 	}
 
@@ -36,39 +74,70 @@ export function attachWebSocketServer({ server, roomManager, config }) {
 		}
 	}
 
+	const hookedRooms = new WeakSet();
+	function hookRoomSnapshots(room) {
+		if (hookedRooms.has(room)) return;
+		hookedRooms.add(room);
+
+		room.on("snapshot", ({ world, events }) => {
+			if (room.players.size === 0) return;
+
+			for (const ev of events) {
+				broadcastRoom(room, encodeMessage("gameEvent", { event: ev }), {
+					critical: false,
+				});
+			}
+
+			for (const player of room.players.values()) {
+				const snapshot = world.toSnapshot(player.lastProcessedSeq);
+				for (const e of snapshot.entities) {
+					if (e.kind === "ship") {
+						const p = room.players.get(e.ownerId);
+						e.ownerSlot = p?.ownerSlot ?? 0;
+					}
+				}
+
+				if (player.codec === "json") {
+					safeSend(player.socket, JSON.stringify(snapshot), {
+						critical: false,
+					});
+				} else {
+					const bin = encodeSnapshotBinary(snapshot);
+					safeSend(player.socket, bin, { critical: false });
+				}
+			}
+		});
+	}
+
 	wss.on("connection", (socket) => {
 		const state = {
 			id: randomUUID().slice(0, 8),
 			player: null,
 			room: null,
-			missedPongs: 0,
-			tokens: config.rateLimitPerSec,
+			tokens: 90,
 			lastRefill: Date.now(),
 		};
+
+		socket.__missedPongs = 0;
 
 		socket.on("error", (err) => {
 			console.error(`[WS socket ${state.id} error]`, err.message);
 		});
 
 		socket.on("pong", () => {
-			state.missedPongs = 0;
+			socket.__missedPongs = 0;
 		});
 
-		// Клієнт повинен надіслати join протягом 5 секунд
 		const joinDeadline = setTimeout(() => {
 			if (!state.player && socket.readyState === WebSocket.OPEN) {
 				socket.close(1008, "Join handshake timeout (5s)");
 			}
 		}, config.joinTimeoutMs);
 
-		socket.on("message", (raw) => {
-			// Token-bucket rate limiter
+		socket.on("message", (raw, isBinary) => {
 			const now = Date.now();
 			const elapsedSec = (now - state.lastRefill) / 1000;
-			state.tokens = Math.min(
-				config.rateLimitPerSec,
-				state.tokens + elapsedSec * config.rateLimitPerSec,
-			);
+			state.tokens = Math.min(90, state.tokens + elapsedSec * 60);
 			state.lastRefill = now;
 
 			if (state.tokens < 1) {
@@ -77,7 +146,11 @@ export function attachWebSocketServer({ server, roomManager, config }) {
 			}
 			state.tokens -= 1;
 
-			const result = validateIncomingMessage(raw, config.maxPayloadBytes);
+			const result = validateIncomingMessage(
+				raw,
+				isBinary,
+				config.maxPayloadBytes,
+			);
 			if (!result.ok) {
 				socket.close(result.code, result.reason);
 				return;
@@ -86,7 +159,38 @@ export function attachWebSocketServer({ server, roomManager, config }) {
 			const msg = result.msg;
 
 			if (msg.type === "ping") {
-				safeSend(socket, encodeMessage("pong"), { critical: false });
+				safeSend(
+					socket,
+					encodeMessage("pong", { clientTime: msg.clientTime, netSim }),
+					{ critical: true },
+				);
+				return;
+			}
+
+			if (msg.type === "netSim") {
+				netSim.latencyMs = msg.latencyMs;
+				netSim.jitterMs = msg.jitterMs;
+				netSim.dropRate = msg.dropRate;
+				if (state.room) {
+					broadcastRoom(
+						state.room,
+						encodeMessage("netSimUpdated", { netSim }),
+						{ critical: true },
+					);
+				}
+				return;
+			}
+
+			if (msg.type === "input") {
+				if (!state.player || !state.room) return;
+				deliverWithNetSim(
+					() => {
+						if (state.room && state.player) {
+							state.room.enqueueInput(state.player.id, msg);
+						}
+					},
+					{ bypassDrop: false },
+				);
 				return;
 			}
 
@@ -106,37 +210,43 @@ export function attachWebSocketServer({ server, roomManager, config }) {
 					}
 				}
 
-				const player = {
+				hookRoomSnapshots(room);
+
+				const joined = room.join({
 					id: state.id,
 					name: msg.name,
+					codec: msg.codec,
 					joinedAt: Date.now(),
 					socket,
-				};
+				});
 
-				if (!room.join(player)) {
+				if (!joined) {
 					socket.close(1013, "Room is full");
 					return;
 				}
 
 				clearTimeout(joinDeadline);
-				state.player = player;
+				state.player = joined;
 				state.room = room;
 
 				safeSend(
 					socket,
 					encodeMessage("welcome", {
-						playerId: player.id,
+						playerId: joined.id,
+						ownerSlot: joined.ownerSlot,
+						codec: joined.codec,
 						room: room.toSummary(),
 						players: room.getRoster(),
+						netSim,
 					}),
-					{ critical: true },
+					{ critical: true, bypassNetSim: true },
 				);
 
 				broadcastRoom(
 					room,
 					encodeMessage("roster", {
 						players: room.getRoster(),
-						systemNotice: `${player.name} joined the arena`,
+						systemNotice: `${joined.name} joined the arena`,
 					}),
 					{ critical: true },
 				);
@@ -157,7 +267,7 @@ export function attachWebSocketServer({ server, roomManager, config }) {
 						name: state.player.name,
 						text: msg.text,
 					}),
-					{ critical: false },
+					{ critical: true },
 				);
 			}
 		});
@@ -181,12 +291,9 @@ export function attachWebSocketServer({ server, roomManager, config }) {
 		});
 	});
 
-	// Heartbeat ping кожні 15 с; розрив після 2 пропущених pong
 	const heartbeat = setInterval(() => {
 		for (const socket of wss.clients) {
 			if (socket.readyState !== WebSocket.OPEN) continue;
-			if (socket.__missedPongs === undefined) socket.__missedPongs = 0;
-
 			if (socket.__missedPongs >= 2) {
 				socket.terminate();
 				continue;
@@ -195,13 +302,6 @@ export function attachWebSocketServer({ server, roomManager, config }) {
 			socket.ping();
 		}
 	}, config.heartbeatIntervalMs);
-
-	wss.on("connection", (socket) => {
-		socket.__missedPongs = 0;
-		socket.on("pong", () => {
-			socket.__missedPongs = 0;
-		});
-	});
 
 	return {
 		wss,

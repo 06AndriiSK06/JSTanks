@@ -1,6 +1,8 @@
-﻿export const PROTOCOL_VERSION = 1;
+﻿import { decodeInputBinary } from "@jstanks/shared";
 
-const ALLOWED_TYPES = new Set(["join", "chat", "ping"]);
+export const PROTOCOL_VERSION = 1;
+
+const ALLOWED_JSON_TYPES = new Set(["join", "chat", "ping", "input", "netSim"]);
 
 export function encodeMessage(type, payload = {}) {
 	return JSON.stringify({
@@ -11,15 +13,24 @@ export function encodeMessage(type, payload = {}) {
 	});
 }
 
-export function validateIncomingMessage(rawBuffer, maxBytes = 4096) {
-	const byteLen = Buffer.byteLength(rawBuffer);
+export function validateIncomingMessage(rawData, isBinary, maxBytes = 4096) {
+	const byteLen = Buffer.byteLength(rawData);
 	if (byteLen > maxBytes) {
 		return { ok: false, code: 1009, reason: "Message too big" };
 	}
 
+	if (isBinary) {
+		try {
+			const msg = decodeInputBinary(rawData);
+			return { ok: true, msg, isBinary: true };
+		} catch (err) {
+			return { ok: false, code: 1007, reason: err.message };
+		}
+	}
+
 	let parsed;
 	try {
-		parsed = JSON.parse(rawBuffer.toString("utf8"));
+		parsed = JSON.parse(rawData.toString("utf8"));
 	} catch {
 		return { ok: false, code: 1007, reason: "Invalid JSON payload" };
 	}
@@ -36,7 +47,7 @@ export function validateIncomingMessage(rawBuffer, maxBytes = 4096) {
 		};
 	}
 
-	if (typeof parsed.type !== "string" || !ALLOWED_TYPES.has(parsed.type)) {
+	if (typeof parsed.type !== "string" || !ALLOWED_JSON_TYPES.has(parsed.type)) {
 		return {
 			ok: false,
 			code: 1003,
@@ -73,6 +84,7 @@ export function validateIncomingMessage(rawBuffer, maxBytes = 4096) {
 				type: "join",
 				room: parsed.room.trim(),
 				name: parsed.name.trim(),
+				codec: parsed.codec === "json" ? "json" : "binary",
 			},
 		};
 	}
@@ -89,14 +101,54 @@ export function validateIncomingMessage(rawBuffer, maxBytes = 4096) {
 				reason: "Chat text must be 1..280 characters",
 			};
 		}
+		return { ok: true, msg: { type: "chat", text: clean } };
+	}
+
+	if (parsed.type === "input") {
+		const seq = Number(parsed.seq);
+		if (!Number.isInteger(seq) || seq < 0) {
+			return { ok: false, code: 1007, reason: "Invalid input seq" };
+		}
+		const thrust = Number(parsed.thrust) || 0;
+		const turn = Number(parsed.turn) || 0;
+		if (Math.abs(thrust) > 1 || Math.abs(turn) > 1) {
+			return {
+				ok: false,
+				code: 1008,
+				reason: "Cheat detected: out-of-range input axis",
+			};
+		}
 		return {
 			ok: true,
 			msg: {
-				type: "chat",
-				text: clean,
+				type: "input",
+				seq,
+				thrust: Math.round(thrust),
+				turn: Math.round(turn),
+				fire: Boolean(parsed.fire),
+				missile: Boolean(parsed.missile),
+				clientTick: Number(parsed.clientTick) || 0,
 			},
 		};
 	}
 
-	return { ok: true, msg: { type: "ping" } };
+	if (parsed.type === "netSim") {
+		return {
+			ok: true,
+			msg: {
+				type: "netSim",
+				latencyMs: Math.max(0, Math.min(1000, Number(parsed.latencyMs) || 0)),
+				jitterMs: Math.max(0, Math.min(500, Number(parsed.jitterMs) || 0)),
+				dropRate: Math.max(0, Math.min(0.5, Number(parsed.dropRate) || 0)),
+			},
+		};
+	}
+
+	return {
+		ok: true,
+		msg: {
+			type: "ping",
+			clientTime: Number(parsed.clientTime) || Date.now(),
+		},
+	};
 }

@@ -1,14 +1,23 @@
 ﻿import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { SharedWorld } from "@jstanks/shared";
 import { createMatchLogger } from "./log/matchlog.js";
 
+const TICK_RATE = 30;
+const TICK_INTERVAL_MS = 1000 / TICK_RATE;
+const FIXED_DT = 1 / TICK_RATE;
+
 export class Room extends EventEmitter {
+	#tickTimer = null;
+	#running = false;
+	#nextTickTime = 0;
+	#nextOwnerSlot = 1;
+
 	constructor({
 		id,
 		name,
 		difficulty = "Normal",
 		initialAsteroids = 5,
-		seekerRatio = 3,
 		maxPlayers = 8,
 		logDir,
 	}) {
@@ -17,11 +26,86 @@ export class Room extends EventEmitter {
 		this.name = name;
 		this.difficulty = difficulty;
 		this.initialAsteroids = initialAsteroids;
-		this.seekerRatio = seekerRatio;
 		this.maxPlayers = maxPlayers;
 		this.players = new Map();
-		this.createdAt = Date.now();
+		this.seed = Math.floor(Math.random() * 0xffffffff) >>> 0;
+		this.world = new SharedWorld({
+			width: 1200,
+			height: 760,
+			seed: this.seed,
+			initialAsteroids,
+		});
+		this.world.spawnWave(initialAsteroids);
+
+		this.tickStats = {
+			tickRate: TICK_RATE,
+			lastDurationMs: 0,
+			avgDurationMs: 0,
+			maxJitterMs: 0,
+		};
+
 		this.loggerPromise = createMatchLogger({ logDir, roomId: id });
+		this.#startLoop();
+	}
+
+	#startLoop() {
+		if (this.#running) return;
+		this.#running = true;
+		this.#nextTickTime = performance.now() + TICK_INTERVAL_MS;
+
+		const stepLoop = () => {
+			if (!this.#running) return;
+			const now = performance.now();
+			const jitter = Math.abs(now - this.#nextTickTime);
+			this.tickStats.maxJitterMs = Math.max(
+				this.tickStats.maxJitterMs * 0.98,
+				jitter,
+			);
+
+			this.#tick();
+
+			const elapsed = performance.now() - now;
+			this.tickStats.lastDurationMs = elapsed;
+			this.tickStats.avgDurationMs =
+				this.tickStats.avgDurationMs * 0.9 + elapsed * 0.1;
+
+			this.#nextTickTime += TICK_INTERVAL_MS;
+			if (this.#nextTickTime < performance.now()) {
+				this.#nextTickTime = performance.now() + TICK_INTERVAL_MS;
+			}
+			this.#tickTimer = setTimeout(
+				stepLoop,
+				Math.max(0, this.#nextTickTime - performance.now()),
+			);
+		};
+
+		this.#tickTimer = setTimeout(stepLoop, TICK_INTERVAL_MS);
+	}
+
+	#tick() {
+		if (this.players.size === 0) return;
+
+		const inputsByOwner = new Map();
+		for (const player of this.players.values()) {
+			if (player.inputQueue.length > 0) {
+				const nextInput = player.inputQueue.shift();
+				inputsByOwner.set(player.id, nextInput);
+				player.lastProcessedSeq = nextInput.seq;
+				player.lastInput = nextInput;
+			} else if (player.lastInput) {
+				inputsByOwner.set(player.id, {
+					...player.lastInput,
+					fire: false,
+					missile: false,
+				});
+			}
+		}
+
+		this.world.step(FIXED_DT, inputsByOwner);
+		this.emit("snapshot", {
+			world: this.world,
+			events: this.world.events,
+		});
 	}
 
 	get playerCount() {
@@ -31,6 +115,7 @@ export class Room extends EventEmitter {
 	getRoster() {
 		return Array.from(this.players.values()).map((p) => ({
 			id: p.id,
+			ownerSlot: p.ownerSlot,
 			name: p.name,
 			joinedAt: p.joinedAt,
 		}));
@@ -43,8 +128,9 @@ export class Room extends EventEmitter {
 			players: this.players.size,
 			maxPlayers: this.maxPlayers,
 			initialAsteroids: this.initialAsteroids,
-			seekerRatio: this.seekerRatio,
 			difficulty: this.difficulty,
+			seed: this.seed,
+			arena: this.world.arena,
 		};
 	}
 
@@ -59,17 +145,49 @@ export class Room extends EventEmitter {
 		if (this.players.size >= this.maxPlayers) {
 			return false;
 		}
-		this.players.set(player.id, player);
-		const event = { type: "join", playerId: player.id, name: player.name };
+		const ownerSlot = this.#nextOwnerSlot++;
+		const enriched = {
+			...player,
+			ownerSlot,
+			inputQueue: [],
+			lastProcessedSeq: 0,
+			lastInput: null,
+		};
+		this.players.set(player.id, enriched);
+
+		const ship = this.world.spawnShip({
+			ownerId: player.id,
+			name: player.name,
+		});
+		ship.ownerSlot = ownerSlot;
+
+		const event = {
+			type: "join",
+			playerId: player.id,
+			ownerSlot,
+			name: player.name,
+		};
 		this.recordEvent(event);
-		this.emit("join", player);
-		return true;
+		this.emit("join", enriched);
+		return enriched;
+	}
+
+	enqueueInput(playerId, input) {
+		const player = this.players.get(playerId);
+		if (!player) return;
+		if (input.seq <= player.lastProcessedSeq) return;
+		if (player.inputQueue.length >= 16) {
+			player.inputQueue.shift();
+		}
+		player.inputQueue.push(input);
 	}
 
 	leave(playerId) {
 		const player = this.players.get(playerId);
 		if (!player) return;
 		this.players.delete(playerId);
+		this.world.removeShip(playerId);
+
 		const event = { type: "leave", playerId: player.id, name: player.name };
 		this.recordEvent(event);
 		this.emit("leave", player);
@@ -91,6 +209,11 @@ export class Room extends EventEmitter {
 	}
 
 	async closeLogger() {
+		this.#running = false;
+		if (this.#tickTimer !== null) {
+			clearTimeout(this.#tickTimer);
+			this.#tickTimer = null;
+		}
 		const logger = await this.loggerPromise;
 		await logger.close();
 	}
@@ -112,7 +235,6 @@ export class RoomManager {
 			name: "Training Range (Standard)",
 			difficulty: "Normal",
 			initialAsteroids: 5,
-			seekerRatio: 3,
 			persistent: true,
 		});
 		this.createRoom({
@@ -120,7 +242,6 @@ export class RoomManager {
 			name: "Iron Fortress (Heavy Waves)",
 			difficulty: "Hard",
 			initialAsteroids: 8,
-			seekerRatio: 2,
 			persistent: true,
 		});
 		this.createRoom({
@@ -128,13 +249,21 @@ export class RoomManager {
 			name: "Drone Swarm (Homing Blitz)",
 			difficulty: "Insane",
 			initialAsteroids: 7,
-			seekerRatio: 1,
 			persistent: true,
 		});
 	}
 
 	listRooms() {
 		return Array.from(this.#rooms.values()).map((r) => r.toSummary());
+	}
+
+	getStats() {
+		return Array.from(this.#rooms.values()).map((r) => ({
+			id: r.id,
+			players: r.playerCount,
+			tick: r.world.tick,
+			...r.tickStats,
+		}));
 	}
 
 	getRoom(id) {
@@ -146,7 +275,6 @@ export class RoomManager {
 		name,
 		difficulty = "Normal",
 		initialAsteroids = 5,
-		seekerRatio = 3,
 		persistent = false,
 	}) {
 		if (this.#rooms.has(id)) {
@@ -161,7 +289,6 @@ export class RoomManager {
 			name: name || `Arena ${id}`,
 			difficulty,
 			initialAsteroids,
-			seekerRatio,
 			maxPlayers: this.maxPlayersPerRoom,
 			logDir: this.logDir,
 		});
