@@ -21,6 +21,7 @@
 		const rawDt = (now - lastTime) / 1000;
 		lastTime = now;
 
+		// Захист від "спіралі смерті" при тривалій паузі або згортанні вкладки
 		const clampedDt = Math.min(Math.max(rawDt, 0), 0.25);
 		accumulator += clampedDt;
 
