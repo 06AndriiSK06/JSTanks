@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="384" height="64" viewBox="0 0 384 64">
+﻿<svg xmlns="http://www.w3.org/2000/svg" width="384" height="64" viewBox="0 0 384 64"><title>JSTanks Sprite Sheet</title>
   <!-- 0: Tank Normal (0..64) -->
   <g transform="translate(32,32)">
     <rect x="-20" y="-17" width="40" height="6" rx="2" fill="#334155"/>
