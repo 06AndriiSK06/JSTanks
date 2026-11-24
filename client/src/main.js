@@ -1,9 +1,11 @@
 ﻿import { fetchJson, loadAll } from "./assets/loader.js";
 import { createAudioEngine } from "./audio/audio.js";
 import { createInput } from "./input.js";
+import { mountRoomChatView } from "./lobby/chatView.js";
 import { Lobby } from "./lobby/lobby.js";
 import { mountLobbyView } from "./lobby/lobbyView.js";
 import { createLoop } from "./loop.js";
+import { GameConnection } from "./net/connection.js";
 import { setupCanvas } from "./render/canvas.js";
 import {
 	createHudRenderer,
@@ -23,11 +25,13 @@ const { ctx } = setupCanvas(canvas, (width, height) => {
 });
 
 const params = new URLSearchParams(window.location.search);
-const failMode = params.get("fail"); // "404" | "timeout" | "abort" | "json"
+const failMode = params.get("fail");
 const sequentialMode = params.get("mode") === "seq";
 
 const audio = createAudioEngine();
 const hud = createHudRenderer();
+const connection = new GameConnection();
+const chatView = mountRoomChatView(connection);
 
 const loadingState = {
 	done: 0,
@@ -39,11 +43,24 @@ const loadingState = {
 	mode: sequentialMode ? "sequential" : "concurrent",
 };
 
-let screenMode = "loading"; // "loading" | "lobby" | "playing"
+let screenMode = "loading";
 let loadedAssets = null;
 let world = null;
 let ship = null;
-const input = createInput(window);
+const rawInput = createInput(window);
+
+// Блокуємо ігрові клавіші (WASD / Space / E), поки гравець друкує повідомлення в чаті
+const input = {
+	isDown(code) {
+		return chatView.isTyping() ? false : rawInput.isDown(code);
+	},
+	justPressed(code) {
+		return chatView.isTyping() ? false : rawInput.justPressed(code);
+	},
+	endStep() {
+		rawInput.endStep();
+	},
+};
 
 function startBattle(roomConfig) {
 	arena.gridSize = loadedAssets?.arenaConfig?.gridSize ?? 48;
@@ -54,16 +71,22 @@ function startBattle(roomConfig) {
 	audio.bindWorld(world);
 	hud.bindWorld(world);
 
+	chatView.show();
+	connection.connect({
+		room: roomConfig.id,
+		name: roomConfig.playerName,
+	});
+
 	screenMode = "playing";
 }
 
 function openLobby() {
 	screenMode = "lobby";
 	const lobbyEndpoint =
-		failMode === "json" ? "/assets/sprites.svg" : "/api/rooms.json";
+		failMode === "json" ? "/assets/sprites.svg" : "/api/rooms";
 	const lobby = new Lobby({
 		endpoint: lobbyEndpoint,
-		pollIntervalMs: 4000,
+		pollIntervalMs: 3500,
 		timeoutMs: 3000,
 	});
 	const view = mountLobbyView(lobby);
@@ -117,12 +140,9 @@ async function runAssetPipeline() {
 
 		loadingState.elapsedMs = loadedAssets.elapsedMs;
 		loadingState.label = `Ready! Loaded in ${loadedAssets.elapsedMs.toFixed(1)} ms`;
-		console.info(
-			`[AssetPipeline] Mode: ${loadedAssets.mode} | Total time: ${loadedAssets.elapsedMs.toFixed(2)} ms`,
-		);
 		audio.setBuffers(loadedAssets.sounds);
 
-		await new Promise((r) => setTimeout(r, 350));
+		await new Promise((r) => setTimeout(r, 300));
 		openLobby();
 	} catch (err) {
 		console.error("[AssetPipeline Failure]", err);
@@ -131,7 +151,7 @@ async function runAssetPipeline() {
 }
 
 window.addEventListener("keydown", (e) => {
-	if (e.code === "KeyM" && screenMode === "playing") {
+	if (e.code === "KeyM" && screenMode === "playing" && !chatView.isTyping()) {
 		audio.toggleMute();
 	}
 	if (screenMode === "loading" && loadingState.error) {

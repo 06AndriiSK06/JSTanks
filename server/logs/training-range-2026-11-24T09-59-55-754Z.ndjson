@@ -1,0 +1,4 @@
+{"t":1795514541299,"roomId":"training-range","type":"join","playerId":"3ec90d0d","name":"Andrii"}
+{"t":1795514543169,"roomId":"training-range","type":"join","playerId":"201d32b1","name":"Player2"}
+{"t":1795514586055,"roomId":"training-range","type":"leave","playerId":"201d32b1","name":"Player2"}
+{"t":1795514586055,"roomId":"training-range","type":"leave","playerId":"3ec90d0d","name":"Andrii"}

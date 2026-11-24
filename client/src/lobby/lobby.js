@@ -7,8 +7,8 @@ export class Lobby extends EventTarget {
 	#active = false;
 
 	constructor({
-		endpoint = "/api/rooms.json",
-		pollIntervalMs = 4000,
+		endpoint = "/api/rooms",
+		pollIntervalMs = 3500,
 		timeoutMs = 3000,
 	} = {}) {
 		super();
@@ -106,11 +106,27 @@ export class Lobby extends EventTarget {
 		}
 	}
 
+	async createRoom({ name, difficulty = "Normal", initialAsteroids = 6 }) {
+		const res = await fetch(this.endpoint, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name, difficulty, initialAsteroids }),
+			signal: AbortSignal.timeout(this.timeoutMs),
+		});
+		const body = await res.json();
+		if (!res.ok) {
+			throw new Error(body.error ?? `HTTP ${res.status}`);
+		}
+		this.selectedRoomId = body.id;
+		await this.refresh();
+		return body;
+	}
+
 	join(roomId = this.selectedRoomId, playerName = this.playerName) {
 		const room = this.#rooms.find((r) => r.id === roomId) ??
 			this.#rooms[0] ?? {
-				id: "offline-arena",
-				name: "Offline Proving Ground",
+				id: "training-range",
+				name: "Training Range (Standard)",
 				initialAsteroids: 5,
 				seekerRatio: 3,
 			};

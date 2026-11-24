@@ -1,17 +1,20 @@
-{
+﻿{
 	"name": "jstanks",
 	"private": true,
-	"version": "0.1.0",
-	"type": "module",
+	"version": "0.4.0",
+	"workspaces": [
+		"client",
+		"server"
+	],
 	"scripts": {
-		"dev": "vite",
-		"build": "vite build",
-		"preview": "vite preview",
-		"lint": "biome check .",
-		"format": "biome format --write ."
+		"dev:server": "npm --workspace=@jstanks/server run dev",
+		"dev:client": "npm --workspace=@jstanks/client run dev",
+		"build": "npm --workspace=@jstanks/client run build",
+		"start": "npm --workspace=@jstanks/server run start",
+		"format": "biome format --write .",
+		"lint": "biome check ."
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.6.8",
-		"vite": "^8.3.8"
+		"@biomejs/biome": "^2.4.12"
 	}
 }
