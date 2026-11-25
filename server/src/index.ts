@@ -1,4 +1,4 @@
-﻿import { createReadStream } from "node:fs";
+﻿import { createReadStream, type Stats } from "node:fs";
 import { stat } from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
@@ -24,6 +24,10 @@ const CreateRoomBodySchema = z.object({
 	name: z.string().trim().min(1).max(40),
 	difficulty: z.enum(["Normal", "Hard", "Insane"]).default("Normal"),
 	initialAsteroids: z.coerce.number().int().min(3).max(15).default(5),
+});
+
+const AddBotsBodySchema = z.object({
+	count: z.coerce.number().int().min(1).max(32).default(8),
 });
 
 class HttpError extends Error {
@@ -95,7 +99,7 @@ async function serveStatic(
 		return;
 	}
 
-	let fileStat;
+	let fileStat: Stats;
 	try {
 		fileStat = await stat(resolvedPath);
 		if (!fileStat.isFile()) throw new Error("Not a file");
@@ -137,6 +141,8 @@ const roomManager = new RoomManager({
 	maxPlayersPerRoom: config.maxPlayersPerRoom,
 });
 
+let lastElu = performance.eventLoopUtilization();
+
 const server = http.createServer(
 	async (req: IncomingMessage, res: ServerResponse) => {
 		try {
@@ -157,9 +163,12 @@ const server = http.createServer(
 			}
 
 			if (req.method === "GET" && pathname === "/api/stats") {
+				const currentElu = performance.eventLoopUtilization(lastElu);
+				lastElu = performance.eventLoopUtilization();
 				sendJson(res, 200, {
 					uptimeSec: Math.round(process.uptime()),
 					rssMb: Number((process.memoryUsage().rss / (1024 * 1024)).toFixed(1)),
+					eventLoopUtilization: Number(currentElu.utilization.toFixed(4)),
 					rooms: roomManager.getStats(),
 				});
 				return;
@@ -181,6 +190,28 @@ const server = http.createServer(
 				}
 				const room = roomManager.createRoom(parsed.data);
 				sendJson(res, 201, room.toSummary());
+				return;
+			}
+
+			const botMatch = /^\/api\/rooms\/([^/]+)\/bots$/.exec(pathname);
+			if (req.method === "POST" && botMatch && botMatch[1]) {
+				const room = roomManager.getRoom(botMatch[1]);
+				if (!room) {
+					sendJson(res, 404, { error: "Room not found" });
+					return;
+				}
+				const rawBody = await readJsonBody(req, 2048);
+				const parsed = AddBotsBodySchema.safeParse(rawBody);
+				if (!parsed.success) {
+					sendJson(res, 400, { error: "Invalid bot count" });
+					return;
+				}
+				const added = room.addBots(parsed.data.count);
+				sendJson(res, 201, {
+					added,
+					totalPlayers: room.playerCount,
+					roster: room.getRoster(),
+				});
 				return;
 			}
 

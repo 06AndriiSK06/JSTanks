@@ -1,4 +1,4 @@
-﻿import { createReadStream } from "node:fs";
+import { createReadStream, type Stats } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import path from "node:path";
@@ -61,7 +61,7 @@ export async function streamReplayToResponse(
 	}
 
 	const filePath = path.join(logDir, replayId);
-	let info;
+	let info: Stats;
 	try {
 		info = await stat(filePath);
 		if (!info.isFile()) throw new Error("Not a file");

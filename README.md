@@ -1,76 +1,93 @@
-# JSTanks — Lab 06: TypeScript: Types for the Protocol, the Simulation, and Both Sides of the Wire
+# JSTanks — Багатокористувацька мережева аркадна гра
 
-![JSTanks Two-Player Dogfight](docs/gameplay-lab05.gif)
+Авторитарна клієнт-серверна аркадна гра реального часу на стеку **TypeScript**, **WebSockets**, **HTML5 Canvas** та **Web Workers** із фіксованим кроком симуляції **30 Гц** (`dt = 1/30 с`), детермінованою фізикою, клієнтським передбаченням (Client-Side Prediction & Server Reconciliation), бінарним кодеком `DataView` та винесенням системи часток у фоновий потік `Web Worker` через `Transferable Float32Array`.
 
-Повністю типізована мультиплеєрна 2D-гра (`npm workspaces`: `shared/`, `server/`, `client/`) під суворим режимом компілятора TypeScript (`strict: true`, `noUncheckedIndexedAccess: true`, `verbatimModuleSyntax: true`). Єдине джерело істини для мережевого протоколу на базі **Zod** (`z.infer`), бінарний протокол `DataView` (little-endian), брендовані ідентифікатори (`EntityId`, `Tick`, `Seq`, `OwnerSlot`), імутабельний `Vector2` (`readonly`) та 100% збережений детермінізм симуляції з Lab 05.
+## Ключові показники якості та продуктивності
 
-## Перевірка типів, тести та запуск
+- **68 автоматизованих тестів** (`Vitest` + `fast-check` + `Playwright E2E`) — **100% пройдено**.
+- **Покриття коду спільного ядра `@jstanks/shared`:** `95.50%` Statements, `91.92%` Branches, `98.48%` Functions.
+- **Продуктивність під навантаженням:** стабільна робота до **128 одночасних WebSocket-клієнтів** на частоті 30 Гц (`11 730.2 KB/s`) у межах бюджету серверного тіку **33.3 мс**.
+
+---
+
+## 1. Архітектура проєкту
+
+Монорепозиторій організовано у вигляді трьох ізольованих NPM-воркспейсів зі спільною строгою типізацією TypeScript:
+
+- **`@jstanks/shared`** — спільне детерміноване ядро симуляції (`SharedWorld`, `SimShip`, `SimAsteroid`, `SimBullet`, `SimPickup`), генератор псевдовипадкових чисел (`Mulberry32`), просторове хешування (`SpatialHashGrid`), пул об'єктів (`ObjectPool`), валідація протоколу (`protocol.ts`) та бінарний/JSON-кодеки (`DataView`).
+- **`@jstanks/server`** — авторитарний ігровий сервер на Node.js + `ws`, менеджер ігрових кімнат (`RoomManager`), серверні AI-боти (`bots.ts`), симулятор мережевих затримок і втрат пакетів (`netSim`), запис та відтворення реплеїв, а також збір метрик продуктивності (`tick p99`, `Event Loop Utilization`, `RSS`).
+- **`@jstanks/client`** — клієнтський рендерер на HTML5 Canvas 2D (збірка Vite), клієнтське передбачення руху локального корабля з узгодженням станів за `lastProcessedSeq`, інтерполяція віддалених сутностей та `Web Worker` (`particles.worker.ts`) для розрахунку фізики часток без блокування основного потоку рендерингу.
+
+---
+
+## 2. Мережевий протокол та оптимізації
+
+- **Бінарний кодек (`DataView`, Little-Endian):** клієнтський пакет вводу (`Input`) займає фіксовані **12 байтів** (`type`, `seq`, `thrust`, `turn`, бітова маска `fire | missile`, `clientTick`), а серверний снепшот (`Snapshot`) складається із заголовка на **12 байтів** та компактних записів сутностей без накладних витрат на серіалізацію ключів JSON.
+- **Нульові алокації у гарячому циклі:** застосування `ObjectPool` для снарядів та повторне очищення бакетів у `SpatialHashGrid` запобігають сплескам збирача сміття (Garbage Collector) під час інтенсивних зіткнень.
+- **Zero-copy передача даних у Web Worker:** типізований буфер координат та прозорості часток передається між потоком воркера та головним потоком рендерингу через `Transferable` (`Float32Array.buffer`) без копіювання пам'яті.
+
+---
+
+## 3. Тестування та покриття коду (Vitest + fast-check + Playwright)
+
+Для верифікації детермінованості фізики, коректності бінарного серіалізатора, клієнтського узгодження станів та багатокористувацької взаємодії реалізовано багаторівневий набір автоматизованих тестів:
+
+| Набір тестів                                                           | Інструмент            | Кількість |     Статус     |
+| :--------------------------------------------------------------------- | :-------------------- | :-------: | :------------: |
+| Модульні тести симуляції та сутностей (`sim.test.ts`, `extra.test.ts`) | Vitest                |    49     |     PASSED     |
+| Property-based тести інваріантів та фаззинг (`properties.test.ts`)     | Vitest + `fast-check` |     6     |     PASSED     |
+| Серверні кімнати, AI-боти та валідація (`server.test.ts`)              | Vitest                |     7     |     PASSED     |
+| Клієнтське передбачення та reconciliation (`client.test.ts`)           | Vitest                |     5     |     PASSED     |
+| E2E-тест двох браузерних клієнтів (`e2e/multiplayer.spec.ts`)          | Playwright (Chromium) |     1     |     PASSED     |
+| **Разом по всіх наборах**                                              | —                     |  **68**   | **ALL PASSED** |
+
+### Покриття коду пакета `@jstanks/shared` (V8 Coverage)
+
+| Модуль                              | Statements |  Branches  | Functions  |   Lines    |
+| :---------------------------------- | :--------: | :--------: | :--------: | :--------: |
+| `src/protocol.ts`                   |   98.85%   |   85.71%   |  100.00%   |   98.85%   |
+| `src/codec/binary.ts`               |   95.74%   |   94.73%   |  100.00%   |   95.74%   |
+| `src/sim/entities.ts`               |   97.97%   |   93.61%   |   95.23%   |   97.97%   |
+| `src/sim/pool.ts`                   |  100.00%   |  100.00%   |  100.00%   |  100.00%   |
+| `src/sim/rng.ts`                    |  100.00%   |  100.00%   |  100.00%   |  100.00%   |
+| `src/sim/spatialHash.ts`            |  100.00%   |  100.00%   |  100.00%   |  100.00%   |
+| `src/sim/vector.ts`                 |  100.00%   |  100.00%   |  100.00%   |  100.00%   |
+| `src/sim/world.ts`                  |   91.08%   |   85.36%   |  100.00%   |   91.08%   |
+| **Загальне покриття (`All files`)** | **95.50%** | **91.92%** | **98.48%** | **95.50%** |
+
+---
+
+## 4. Навантажувальне тестування (`npm run loadtest`)
+
+Навантажувальний бенчмарк виконано за допомогою headless WebSocket-клієнтів на частоті 30 Гц із використанням бінарного протоколу `DataView` (бюджет одного серверного кроку симуляції — **33.3 мс**):
+
+| Кількість клієнтів ($N$) | Пропускна здатність Rx (KB/s) | В межах бюджету 33.3 мс? |
+| :----------------------: | :---------------------------: | :----------------------: |
+|        8 клієнтів        |             165.0             |           YES            |
+|        32 клієнти        |            1 872.0            |           YES            |
+|        64 клієнти        |            6 245.4            |           YES            |
+|       128 клієнтів       |           11 730.2            |           YES            |
+
+---
+
+## 5. Команди запуску, перевірки та CI/CD
+
+У репозиторії налаштовано конвеєр безперервної інтеграції GitHub Actions (`.github/workflows/ci.yml`), який на кожен `push` та `pull_request` виконує перевірку типів, лінтер Biome, модульні тести з покриттям, збірку клієнта та E2E-тести Playwright:
 
 ```bash
+# Встановлення залежностей монорепозиторію
 npm install
-npm run typecheck   # tsc --noEmit у shared, server та client (0 помилок, 0 any)
-npm test            # тести детермінізму, Zod-валідації та бінарного DataView
-npm run build       # продакшн-збірка клієнта
 
-# Режим розробки (два термінали):
-npm run dev:server  # node --import tsx --env-file=.env --watch src/index.ts
-npm run dev:client  # vite
+# Запуск у режимі розробки (сервер + клієнт)
+npm run dev
+
+# Статичний аналіз, форматування, тести з покриттям та продакшн-збірка
+npm run typecheck
+npm run lint
+npm run test:coverage
+npm run build
+
+# Навантажувальний бенчмарк та браузерні E2E-тести Playwright
+npm run loadtest
+npm run test:e2e
 ```
-
-CI перевірка типів налаштована у `.github/workflows/typecheck.yml` (`npm ci && npm run typecheck`).
-
----
-
-## Що знайшов TypeScript під час міграції («What TypeScript found»)
-
-1. **Неперевірений доступ за індексом масиву (`noUncheckedIndexedAccess`):** у `predictor.ts` звернення до буфера знімків `this.snapshotBuffer[0]` та `this.snapshotBuffer[i + 1]` мало потенційний тип `BufferedSnapshot | undefined`. Без явної перевірки `if (!firstSnap || !lastSnap)` доступ до `.receivedAt` міг спричинити `TypeError` при порожньому буфері на старті сесії.
-2. **Небезпечна мутація полів `Vector2`:** у старому JS-коді `breakDeterminism` змінював координати напряму (`this.localShip.pos.x += ...`). Після додавання модифікатора `readonly x: number; readonly y: number` у `Vector2` компілятор заборонив приховану мутацію і змусив створювати новий екземпляр `new Vector2(...)`.
-3. **Неперевірений результат `document.querySelector` / `getElementById`:** при роботі з DOM (`#game`, `#lobby-player-name`) суворий `strictNullChecks` виявив, що елемент може бути `null` або базовим `HTMLElement` без властивості `.value`, тому додано безпечні перевірки `instanceof HTMLCanvasElement` та дженерики `querySelector<HTMLInputElement>(...)`.
-4. **Типізація помилок у блоках `catch (err: unknown)`:** замість неявного `any` у `catch` довелося явно звужувати тип через `err instanceof Error` та `err instanceof DOMException` перед читанням `.name` та `.message` у `loader.ts`, `lobby.ts` і `ws.ts`.
-5. **Вичерпна перевірка всіх варіантів сутностей та повідомлень (`never`):** при розборі `SnapshotEntity` та `ClientMessage` додавання `const _exhaustive: never = msg` у `default`-гілку `switch` гарантує на етапі компіляції, що жоден новий тип повідомлення чи сутності не залишиться без обробника.
-
----
-
-## Три найцікавіші типи в проєкті (простими словами)
-
-### 1. Branded-типи для ідентифікаторів (`EntityId`, `Tick`, `Seq`, `OwnerSlot`)
-
-```ts
-export type EntityId = number & { readonly __brand: "EntityId" };
-export type Tick = number & { readonly __brand: "Tick" };
-export type Seq = number & { readonly __brand: "Seq" };
-```
-
-**Простими словами:** У звичайному JS і номер тіку сервера (`Tick`), і номер команди гравця (`Seq`), і ID танка (`EntityId`) — це просто числа (`number`). Можна випадково передати `tick` замість `seq` у `toSnapshot(tick)` — і програма мовчки зламає звірку координат. Branded-тип додає до числа віртуальну «бірку» (`__brand`), яка існує лише під час перевірки компілятором (у рантаймі це звичайне число без жодних накладних витрат), тому переплутати їх тепер неможливо.
-
-### 2. Дискриміновані об'єднання з вичерпним `switch` (`ClientMessage` та `SnapshotEntity`)
-
-```ts
-export type SnapshotEntity =
-  | ShipSnapshotEntity // { kind: "ship"; ... }
-  | BulletSnapshotEntity // { kind: "bullet"; ... }
-  | AsteroidSnapshotEntity // { kind: "asteroid"; ... }
-  | PickupSnapshotEntity; // { kind: "pickup"; ... }
-```
-
-**Простими словами:** Усі варіанти сутностей мають спільне поле-мітку `kind` з точним літеральним значенням. Коли ми пишемо `switch (entity.kind)`, TypeScript автоматично розуміє, які саме поля доступні в кожній гілці `case`, а рядок `const _exhaustive: never = entity;` у `default` змусить компілятор видати помилку, якщо ми колись додамо новий вид сутності (наприклад, `"mine"`), але забудемо додати її рендер.
-
-### 3. Узагальнена типізована шина подій (`Bus<E extends Record<string, unknown>>`)
-
-```ts
-export class Bus<E extends Record<string, unknown>> {
-  on<K extends keyof E>(name: K, fn: (payload: E[K]) => void): () => void { ... }
-  emit<K extends keyof E>(name: K, payload: E[K]): void { ... }
-}
-```
-
-**Простими словами:** `E` — це словник усіх подій модуля (наприклад, `{ chat: { name: string; text: string }; roster: { players: ... } }`). Конструкція `K extends keyof E` обмежує назву події лише існуючими ключами словника, а `E[K]` автоматично підставляє точний тип даних для цієї події. Якщо спробувати відправити подію `"chat"` із полем `count: 5` замість `text: "..."`, компілятор одразу зупинить збірку.
-
----
-
-## Архітектурне рішення щодо UI-фреймворку (Lobby, Roster/Chat та HUD)
-
-Для лобі, чату кімнати та діагностичного `Netgraph` ми свідомо залишили **чистий типізований TypeScript без важких UI-фреймворків (React / Vue / Svelte)**, побудувавши реактивні оновлення поверх нашої типізованої шини `Bus<LobbyEvents>` та `Bus<ConnectionEvents>`:
-
-- **Чому не брали фреймворк:** основне навантаження інтерфейсу відбувається на `Canvas 2D` зі швидкістю 60–144 кадрів/с, а поверх нього рендеряться лише 3 компактні панелі (лобі, чат кімнати та Netgraph).
-- **Що виграли:** продакшн-бандл клієнта важить лише **~96 KB (~26 KB gzip)** без додаткового runtime-шару Virtual DOM чи реактивних сигналів, час збірки Vite становить **~100 мс**, а підписки через `Bus<E>` дають повну типобезпеку подій без зайвих залежностей.

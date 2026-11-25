@@ -73,7 +73,7 @@ export class SimShip {
 	}
 
 	savePreviousState(): void {
-		this.prevPos = this.pos.clone();
+		this.prevPos = this.pos;
 		this.prevAngle = this.angle;
 	}
 
@@ -109,20 +109,28 @@ export class SimShip {
 
 		const accel = thrustDir >= 0 ? 340 : 210;
 		this.thrusting = thrustDir !== 0;
+		let vx = this.vel.x;
+		let vy = this.vel.y;
 		if (thrustDir !== 0) {
-			const forward = Vector2.fromAngle(this.angle, thrustDir * accel * dt);
-			this.vel = this.vel.add(forward);
+			vx += Math.cos(this.angle) * thrustDir * accel * dt;
+			vy += Math.sin(this.angle) * thrustDir * accel * dt;
 		}
 
-		this.vel = this.vel.scale(0.18 ** dt);
+		const drag = 0.18 ** dt;
+		vx *= drag;
+		vy *= drag;
 		const maxSpeed = 290;
-		if (this.vel.length() > maxSpeed) {
-			this.vel = this.vel.normalize().scale(maxSpeed);
+		const speed = Math.hypot(vx, vy);
+		if (speed > maxSpeed) {
+			const k = maxSpeed / speed;
+			vx *= k;
+			vy *= k;
 		}
 
+		this.vel = new Vector2(vx, vy);
 		this.pos = new Vector2(
-			wrapCoord(this.pos.x + this.vel.x * dt, arena.width),
-			wrapCoord(this.pos.y + this.vel.y * dt, arena.height),
+			wrapCoord(this.pos.x + vx * dt, arena.width),
+			wrapCoord(this.pos.y + vy * dt, arena.height),
 		);
 
 		const cdScale = this.rapidFireTimer > 0 ? 0.45 : 1;
@@ -159,19 +167,19 @@ export class SimShip {
 }
 
 export class SimBullet {
-	readonly id: EntityId;
+	id: EntityId;
 	readonly kind = "bullet" as const;
-	readonly ownerId: string;
-	readonly ownerSlot: OwnerSlot;
+	ownerId: string;
+	ownerSlot: OwnerSlot;
 	pos: Vector2;
 	prevPos: Vector2;
 	vel: Vector2;
 	angle: number;
 	prevAngle: number;
-	readonly isMissile: boolean;
-	readonly clientSeq: Seq;
-	readonly radius: number;
-	readonly damage: number;
+	isMissile: boolean;
+	clientSeq: Seq;
+	radius: number;
+	damage: number;
 	ttl: number;
 	alive = true;
 
@@ -202,8 +210,36 @@ export class SimBullet {
 		this.ttl = this.isMissile ? 2.4 : 1.35;
 	}
 
+	reset(params: {
+		id: EntityId;
+		ownerId: string;
+		ownerSlot: OwnerSlot;
+		x: number;
+		y: number;
+		vx: number;
+		vy: number;
+		angle: number;
+		isMissile: boolean;
+		clientSeq: Seq;
+	}): void {
+		this.id = params.id;
+		this.ownerId = params.ownerId;
+		this.ownerSlot = params.ownerSlot;
+		this.pos = new Vector2(params.x, params.y);
+		this.prevPos = this.pos;
+		this.vel = new Vector2(params.vx, params.vy);
+		this.angle = params.angle;
+		this.prevAngle = params.angle;
+		this.isMissile = params.isMissile;
+		this.clientSeq = params.clientSeq;
+		this.radius = params.isMissile ? 7 : 4;
+		this.damage = params.isMissile ? 45 : 25;
+		this.ttl = params.isMissile ? 2.4 : 1.35;
+		this.alive = true;
+	}
+
 	savePreviousState(): void {
-		this.prevPos = this.pos.clone();
+		this.prevPos = this.pos;
 		this.prevAngle = this.angle;
 	}
 
@@ -287,7 +323,7 @@ export class SimAsteroid {
 	}
 
 	savePreviousState(): void {
-		this.prevPos = this.pos.clone();
+		this.prevPos = this.pos;
 		this.prevAngle = this.angle;
 	}
 
@@ -338,6 +374,6 @@ export class SimPickup {
 	}
 
 	savePreviousState(): void {
-		this.prevPos = this.pos.clone();
+		this.prevPos = this.pos;
 	}
 }

@@ -6,7 +6,12 @@ const EnvSchema = z.object({
 	HOST: z.string().trim().min(1).default("0.0.0.0"),
 	LOG_DIR: z.string().trim().min(1).default("./logs"),
 	MAX_ROOMS: z.coerce.number().int().positive().max(200).default(20),
-	MAX_PLAYERS_PER_ROOM: z.coerce.number().int().positive().max(32).default(8),
+	MAX_PLAYERS_PER_ROOM: z.coerce
+		.number()
+		.int()
+		.positive()
+		.max(256)
+		.default(160),
 	SIM_LATENCY_MS: z.coerce.number().min(0).max(1000).default(0),
 	SIM_JITTER_MS: z.coerce.number().min(0).max(500).default(0),
 	SIM_DROP_RATE: z.coerce.number().min(0).max(0.5).default(0),

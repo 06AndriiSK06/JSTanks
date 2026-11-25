@@ -15,6 +15,7 @@ import {
 	type SnapshotCodec,
 } from "@jstanks/shared";
 import type { WebSocket } from "ws";
+import { BotPlayer } from "./bots.js";
 import {
 	createMatchLogger,
 	type MatchLogEntry,
@@ -51,6 +52,7 @@ export interface RoomTickStats {
 	readonly tickRate: number;
 	lastDurationMs: number;
 	avgDurationMs: number;
+	p99DurationMs: number;
 	maxJitterMs: number;
 }
 
@@ -59,6 +61,7 @@ export class Room extends EventEmitter<RoomEventMap> {
 	private running = false;
 	private nextTickTime = 0;
 	private nextOwnerSlot = 1;
+	private readonly durationSamples: number[] = [];
 
 	readonly id: string;
 	readonly name: string;
@@ -66,6 +69,7 @@ export class Room extends EventEmitter<RoomEventMap> {
 	readonly initialAsteroids: number;
 	readonly maxPlayers: number;
 	readonly players = new Map<string, RoomPlayer>();
+	readonly bots = new Map<string, BotPlayer>();
 	readonly seed: number;
 	readonly world: SharedWorld;
 	readonly tickStats: RoomTickStats;
@@ -84,7 +88,7 @@ export class Room extends EventEmitter<RoomEventMap> {
 		this.name = params.name;
 		this.difficulty = params.difficulty ?? "Normal";
 		this.initialAsteroids = params.initialAsteroids ?? 5;
-		this.maxPlayers = params.maxPlayers ?? 8;
+		this.maxPlayers = params.maxPlayers ?? 160;
 		this.seed = Math.floor(Math.random() * 0xffffffff) >>> 0;
 		this.world = new SharedWorld({
 			width: 1200,
@@ -98,6 +102,7 @@ export class Room extends EventEmitter<RoomEventMap> {
 			tickRate: TICK_RATE,
 			lastDurationMs: 0,
 			avgDurationMs: 0,
+			p99DurationMs: 0,
 			maxJitterMs: 0,
 		};
 
@@ -129,6 +134,14 @@ export class Room extends EventEmitter<RoomEventMap> {
 			this.tickStats.avgDurationMs =
 				this.tickStats.avgDurationMs * 0.9 + elapsed * 0.1;
 
+			this.durationSamples.push(elapsed);
+			if (this.durationSamples.length > 180) {
+				this.durationSamples.shift();
+			}
+			const sorted = [...this.durationSamples].sort((a, b) => a - b);
+			const idx = Math.min(sorted.length - 1, Math.floor(sorted.length * 0.99));
+			this.tickStats.p99DurationMs = sorted[idx] ?? elapsed;
+
 			this.nextTickTime += TICK_INTERVAL_MS;
 			if (this.nextTickTime < performance.now()) {
 				this.nextTickTime = performance.now() + TICK_INTERVAL_MS;
@@ -143,9 +156,10 @@ export class Room extends EventEmitter<RoomEventMap> {
 	}
 
 	private tick(): void {
-		if (this.players.size === 0) return;
+		if (this.players.size === 0 && this.bots.size === 0) return;
 
 		const inputsByOwner = new Map<string, PlayerInputCommand>();
+
 		for (const player of this.players.values()) {
 			const nextInput = player.inputQueue.shift();
 			if (nextInput) {
@@ -161,6 +175,10 @@ export class Room extends EventEmitter<RoomEventMap> {
 			}
 		}
 
+		for (const bot of this.bots.values()) {
+			inputsByOwner.set(bot.id, bot.decideInput(this.world, FIXED_DT));
+		}
+
 		this.world.step(FIXED_DT, inputsByOwner);
 		this.emit("snapshot", {
 			world: this.world,
@@ -169,23 +187,61 @@ export class Room extends EventEmitter<RoomEventMap> {
 	}
 
 	get playerCount(): number {
-		return this.players.size;
+		return this.players.size + this.bots.size;
+	}
+
+	addBots(count: number): number {
+		let added = 0;
+		for (let i = 0; i < count; i += 1) {
+			if (this.playerCount >= this.maxPlayers) break;
+			const slotNum = this.nextOwnerSlot++;
+			const bot = new BotPlayer(slotNum);
+			this.bots.set(bot.id, bot);
+			this.world.spawnShip({
+				ownerId: bot.id,
+				ownerSlot: asOwnerSlot(slotNum),
+				name: bot.name,
+			});
+			added += 1;
+		}
+		return added;
+	}
+
+	clearBots(): void {
+		for (const botId of this.bots.keys()) {
+			this.world.removeShip(botId);
+		}
+		this.bots.clear();
 	}
 
 	getRoster(): RosterPlayerInfo[] {
-		return Array.from(this.players.values()).map((p) => ({
-			id: p.id,
-			ownerSlot: p.ownerSlot,
-			name: p.name,
-			joinedAt: p.joinedAt,
-		}));
+		const list: RosterPlayerInfo[] = Array.from(this.players.values()).map(
+			(p) => ({
+				id: p.id,
+				ownerSlot: p.ownerSlot,
+				name: p.name,
+				joinedAt: p.joinedAt,
+			}),
+		);
+		for (const bot of this.bots.values()) {
+			const ship = this.world.ships.get(bot.id);
+			if (ship) {
+				list.push({
+					id: bot.id,
+					ownerSlot: ship.ownerSlot,
+					name: bot.name,
+					joinedAt: 0,
+				});
+			}
+		}
+		return list;
 	}
 
 	toSummary(): RoomSummaryInfo {
 		return {
 			id: this.id,
 			name: this.name,
-			players: this.players.size,
+			players: this.playerCount,
 			maxPlayers: this.maxPlayers,
 			initialAsteroids: this.initialAsteroids,
 			difficulty: this.difficulty,
@@ -208,7 +264,7 @@ export class Room extends EventEmitter<RoomEventMap> {
 		joinedAt: number;
 		socket: WebSocket;
 	}): RoomPlayer | null {
-		if (this.players.size >= this.maxPlayers) {
+		if (this.playerCount >= this.maxPlayers) {
 			return null;
 		}
 		const ownerSlot = asOwnerSlot(this.nextOwnerSlot++);
@@ -258,6 +314,7 @@ export class Room extends EventEmitter<RoomEventMap> {
 		this.emit("leave", player);
 
 		if (this.players.size === 0) {
+			this.clearBots();
 			this.emit("empty", this.id);
 		}
 	}
@@ -292,7 +349,7 @@ export class RoomManager {
 	}) {
 		this.logDir = params.logDir;
 		this.maxRooms = params.maxRooms ?? 20;
-		this.maxPlayersPerRoom = params.maxPlayersPerRoom ?? 8;
+		this.maxPlayersPerRoom = params.maxPlayersPerRoom ?? 160;
 		this.seedDefaults();
 	}
 
@@ -325,11 +382,12 @@ export class RoomManager {
 	}
 
 	getStats(): Array<
-		{ id: string; players: number; tick: number } & RoomTickStats
+		{ id: string; players: number; bots: number; tick: number } & RoomTickStats
 	> {
 		return Array.from(this.rooms.values()).map((r) => ({
 			id: r.id,
-			players: r.playerCount,
+			players: r.players.size,
+			bots: r.bots.size,
 			tick: r.world.tick,
 			...r.tickStats,
 		}));

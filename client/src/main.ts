@@ -15,6 +15,7 @@ import {
 	drawMultiplayerWorld,
 	type LoadingScreenState,
 } from "./render/draw.js";
+import { ParticleSystem } from "./render/particles.js";
 
 const canvasEl = document.getElementById("game");
 if (!(canvasEl instanceof HTMLCanvasElement)) {
@@ -35,10 +36,20 @@ const codecMode = params.get("codec") === "json" ? "json" : "binary";
 
 const audio = createAudioEngine();
 const hud = createHudRenderer();
+const particles = new ParticleSystem();
 const connection = new GameConnection({ codec: codecMode });
 const session = new NetworkSession({ arenaWidth: 1200, arenaHeight: 760 });
 const chatView = mountRoomChatView(connection);
-const netgraphView = mountNetgraphView({ connection, session });
+
+let currentRoomId = "training-range";
+let currentRoomName = "Arena";
+
+const netgraphView = mountNetgraphView({
+	connection,
+	session,
+	particles,
+	getRoomId: () => currentRoomId,
+});
 
 const loadingState: LoadingScreenState = {
 	done: 0,
@@ -52,7 +63,6 @@ const loadingState: LoadingScreenState = {
 
 let screenMode: "loading" | "lobby" | "playing" = "loading";
 let loadedAssets: LoadedAssets | null = null;
-let currentRoomName = "Arena";
 const rawInput = createInput(window);
 
 function toAxis(pos: boolean, neg: boolean): -1 | 0 | 1 {
@@ -97,7 +107,10 @@ connection.on("roster", (detail) => {
 });
 
 connection.on("snapshot", (snap) => {
+	performance.mark("reconcile:start");
 	session.onSnapshot(snap);
+	performance.mark("reconcile:end");
+	performance.measure("reconcile", "reconcile:start", "reconcile:end");
 });
 
 connection.on("gameEvent", (detail) => {
@@ -114,6 +127,7 @@ connection.on("gameEvent", (detail) => {
 			break;
 		case "exploded":
 			audio.play("explosion", { volume: ev.kind === "ship" ? 0.9 : 0.65 });
+			particles.spawnExplosion(ev.x, ev.y, ev.kind === "ship" ? 28 : 16);
 			break;
 		case "pickup":
 			audio.play("pickup", { volume: 0.6 });
@@ -126,6 +140,7 @@ connection.on("gameEvent", (detail) => {
 });
 
 function startMultiplayerBattle(roomConfig: SelectedRoomConfig): void {
+	currentRoomId = roomConfig.id;
 	currentRoomName = roomConfig.name;
 	chatView.show();
 	netgraphView.show();
@@ -243,14 +258,20 @@ canvas.addEventListener("click", () => {
 const loop = createLoop({
 	step: 1 / 30,
 	simulate(dt) {
+		performance.mark("simulate:start");
 		if (screenMode === "playing") {
 			const controls = readControls();
 			const inputPacket = session.stepLocalPrediction(dt, controls);
 			connection.sendInput(inputPacket);
+			particles.step(dt);
 		}
 		rawInput.endStep();
+		performance.mark("simulate:end");
+		performance.measure("simulate", "simulate:start", "simulate:end");
 	},
 	render() {
+		const t0 = performance.now();
+		performance.mark("render:start");
 		if (screenMode === "loading") {
 			drawLoadingScreen(ctx, viewportArena, loadingState);
 		} else if (screenMode === "playing") {
@@ -262,8 +283,18 @@ const loop = createLoop({
 				entities,
 				loadedAssets,
 			);
+			const offsetX = Math.floor(
+				(viewportArena.width - session.arena.width) / 2,
+			);
+			const offsetY = Math.floor(
+				(viewportArena.height - session.arena.height) / 2,
+			);
+			particles.draw(ctx, offsetX, offsetY);
 			hud.draw(ctx, loop.getStats(), currentRoomName, session.localShip, audio);
 		}
+		performance.mark("render:end");
+		performance.measure("render", "render:start", "render:end");
+		netgraphView.recordFrameMs(performance.now() - t0);
 	},
 });
 

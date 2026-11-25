@@ -14,6 +14,10 @@ export interface LoadingScreenState {
 	mode: "sequential" | "concurrent";
 }
 
+function assertNever(val: never): never {
+	throw new Error(`Unexpected entity kind: ${String(val)}`);
+}
+
 export function drawLoadingScreen(
 	ctx: CanvasRenderingContext2D,
 	arena: ArenaBounds,
@@ -235,10 +239,8 @@ export function drawMultiplayerWorld(
 				ctx.restore();
 				break;
 			}
-			default: {
-				const _exhaustive: never = e;
-				return _exhaustive;
-			}
+			default:
+				assertNever(e);
 		}
 	}
 

@@ -3,6 +3,7 @@ import {
 	type ArenaBounds,
 	asEntityId,
 	asOwnerSlot,
+	asSeq,
 	asTick,
 	type EntityId,
 	type OwnerSlot,
@@ -19,7 +20,9 @@ import {
 	SimPickup,
 	SimShip,
 } from "./entities.js";
+import { ObjectPool } from "./pool.js";
 import { createRng, type RngFn } from "./rng.js";
+import { SpatialHashGrid } from "./spatialHash.js";
 import { Vector2 } from "./vector.js";
 
 export class SharedWorld {
@@ -35,6 +38,27 @@ export class SharedWorld {
 	readonly pickups = new Map<EntityId, SimPickup>();
 	private pickupTimer = 6.0;
 	readonly events: SimGameEvent[] = [];
+
+	readonly bulletPool = new ObjectPool<SimBullet>(
+		() =>
+			new SimBullet({
+				id: asEntityId(0),
+				ownerId: "",
+				ownerSlot: asOwnerSlot(0),
+				x: 0,
+				y: 0,
+				vx: 0,
+				vy: 0,
+				angle: 0,
+			}),
+		() => {},
+		64,
+	);
+
+	private readonly asteroidGrid = new SpatialHashGrid<SimAsteroid>(96);
+	private readonly shipGrid = new SpatialHashGrid<SimShip>(96);
+	private readonly queryAsteroidsBuf: SimAsteroid[] = [];
+	private readonly queryShipsBuf: SimShip[] = [];
 
 	constructor(
 		params: {
@@ -117,7 +141,8 @@ export class SharedWorld {
 		const muzzle = Vector2.fromAngle(ship.angle, ship.radius + 10);
 		const speed = isMissile ? 340 : 520;
 		const vel = Vector2.fromAngle(ship.angle, speed).add(ship.vel.scale(0.25));
-		const bullet = new SimBullet({
+		const bullet = this.bulletPool.acquire();
+		bullet.reset({
 			id: this.allocId(),
 			ownerId: ship.ownerId,
 			ownerSlot: ship.ownerSlot,
@@ -149,7 +174,7 @@ export class SharedWorld {
 				this.spawnBulletFromShip(
 					ship,
 					shot.isMissile,
-					input ? input.seq : (0 as Seq),
+					input ? input.seq : asSeq(0),
 				);
 			}
 		}
@@ -164,10 +189,13 @@ export class SharedWorld {
 			ast.step(dt, this.arena, this.ships.values());
 		}
 
-		this.resolveCollisions();
+		this.resolveCollisionsSpatial();
 
 		for (const [id, b] of this.bullets) {
-			if (!b.alive) this.bullets.delete(id);
+			if (!b.alive) {
+				this.bullets.delete(id);
+				this.bulletPool.release(b);
+			}
 		}
 		for (const [id, a] of this.asteroids) {
 			if (!a.alive) this.asteroids.delete(id);
@@ -195,11 +223,27 @@ export class SharedWorld {
 		}
 	}
 
-	private resolveCollisions(): void {
+	private resolveCollisionsSpatial(): void {
+		this.asteroidGrid.clear();
+		for (const ast of this.asteroids.values()) {
+			if (ast.alive) this.asteroidGrid.insert(ast);
+		}
+
+		this.shipGrid.clear();
+		for (const ship of this.ships.values()) {
+			if (ship.isSpawned()) this.shipGrid.insert(ship);
+		}
+
 		for (const bullet of this.bullets.values()) {
 			if (!bullet.alive) continue;
 
-			for (const ast of this.asteroids.values()) {
+			const nearAsteroids = this.asteroidGrid.queryNear(
+				bullet.pos.x,
+				bullet.pos.y,
+				bullet.radius + 30,
+				this.queryAsteroidsBuf,
+			);
+			for (const ast of nearAsteroids) {
 				if (!ast.alive) continue;
 				if (bullet.pos.distanceTo(ast.pos) <= bullet.radius + ast.radius) {
 					bullet.alive = false;
@@ -241,7 +285,13 @@ export class SharedWorld {
 
 			if (!bullet.alive) continue;
 
-			for (const ship of this.ships.values()) {
+			const nearShips = this.shipGrid.queryNear(
+				bullet.pos.x,
+				bullet.pos.y,
+				bullet.radius + 24,
+				this.queryShipsBuf,
+			);
+			for (const ship of nearShips) {
 				if (!ship.isSpawned() || ship.ownerId === bullet.ownerId) continue;
 				if (bullet.pos.distanceTo(ship.pos) <= bullet.radius + ship.radius) {
 					bullet.alive = false;
@@ -266,7 +316,13 @@ export class SharedWorld {
 		for (const ship of this.ships.values()) {
 			if (!ship.isSpawned()) continue;
 
-			for (const ast of this.asteroids.values()) {
+			const nearAsteroids = this.asteroidGrid.queryNear(
+				ship.pos.x,
+				ship.pos.y,
+				ship.radius + 30,
+				this.queryAsteroidsBuf,
+			);
+			for (const ast of nearAsteroids) {
 				if (!ast.alive) continue;
 				if (ship.pos.distanceTo(ast.pos) <= ship.radius + ast.radius) {
 					ast.alive = false;

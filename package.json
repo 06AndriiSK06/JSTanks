@@ -1,7 +1,7 @@
-﻿{
+{
 	"name": "jstanks",
 	"private": true,
-	"version": "0.6.0",
+	"version": "0.7.0",
 	"workspaces": [
 		"client",
 		"server",
@@ -12,15 +12,22 @@
 		"dev:client": "npm --workspace=@jstanks/client run dev",
 		"build": "npm --workspace=@jstanks/client run build",
 		"start": "npm --workspace=@jstanks/server run start",
-		"test": "node --import tsx --test shared/test/*.test.ts",
+		"test": "vitest run",
+		"test:coverage": "vitest run --coverage",
+		"test:e2e": "playwright test",
+		"loadtest": "node --import tsx server/test/load-test.ts",
 		"typecheck": "npm --workspace=@jstanks/shared run typecheck && npm --workspace=@jstanks/server run typecheck && npm --workspace=@jstanks/client run typecheck",
 		"format": "biome format --write .",
 		"lint": "biome check ."
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.12",
+		"@playwright/test": "^1.49.1",
 		"@types/node": "^22.10.0",
+		"@vitest/coverage-v8": "^2.1.8",
+		"fast-check": "^3.23.1",
 		"tsx": "^4.19.2",
-		"typescript": "^5.7.2"
+		"typescript": "^5.7.2",
+		"vitest": "^2.1.8"
 	}
 }
