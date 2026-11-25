@@ -63,8 +63,8 @@ jobs:
           build-args: |
             GIT_SHA=${{ github.ref_name }}
           tags: |
-            ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/06andriisk06/jstanks:${{ github.ref_name }}
+            ghcr.io/06andriisk06/jstanks:latest
       - name: Trigger hosting deploy hook (optional)
         env:
           RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
