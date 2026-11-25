@@ -18,8 +18,8 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
-      - run: npm run test:coverage
       - run: npm --workspace=@jstanks/shared run build && npm --workspace=@jstanks/server run build && npm --workspace=@jstanks/client run build
+      - run: npm run test:coverage
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
       - name: Build & verify Docker image (< 200 MB & SIGTERM < 10s)
