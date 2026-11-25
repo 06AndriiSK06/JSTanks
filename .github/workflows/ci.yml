@@ -66,5 +66,7 @@ jobs:
             ghcr.io/${{ github.repository }}:${{ github.ref_name }}
             ghcr.io/${{ github.repository }}:latest
       - name: Trigger hosting deploy hook (optional)
-        if: ${{ secrets.RENDER_DEPLOY_HOOK != '' }}
-        run: curl -fsSL -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        if: env.RENDER_DEPLOY_HOOK != ''
+        run: curl -fsSL -X POST "$RENDER_DEPLOY_HOOK"
