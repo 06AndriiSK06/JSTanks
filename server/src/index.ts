@@ -1,4 +1,4 @@
-﻿import { createReadStream, type Stats } from "node:fs";
+import { createReadStream, type Stats } from "node:fs";
 import { stat } from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
@@ -6,14 +6,31 @@ import { pipeline } from "node:stream/promises";
 import { z } from "zod";
 import { loadConfig } from "./config.js";
 import { listReplays, streamReplayToResponse } from "./log/replay.js";
+import { createLogger } from "./logger.js";
+import { ServerMetrics } from "./metrics.js";
 import { RoomManager } from "./rooms.js";
 import { attachWebSocketServer } from "./ws.js";
+
+const config = loadConfig();
+const logger = createLogger(config.logLevel);
+const metrics = new ServerMetrics();
+
+process.on("uncaughtException", (err) => {
+	logger.fatal({ err }, "uncaught_exception");
+	process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+	logger.fatal({ err: reason }, "unhandled_rejection");
+	process.exit(1);
+});
 
 const MIME_TYPES: Readonly<Record<string, string>> = {
 	".html": "text/html; charset=utf-8",
 	".js": "text/javascript; charset=utf-8",
 	".css": "text/css; charset=utf-8",
 	".json": "application/json; charset=utf-8",
+	".webmanifest": "application/manifest+json; charset=utf-8",
 	".svg": "image/svg+xml",
 	".png": "image/png",
 	".wav": "audio/wav",
@@ -134,14 +151,13 @@ async function serveStatic(
 	await pipeline(createReadStream(resolvedPath), res);
 }
 
-const config = loadConfig();
 const roomManager = new RoomManager({
 	logDir: config.logDir,
 	maxRooms: config.maxRooms,
 	maxPlayersPerRoom: config.maxPlayersPerRoom,
 });
 
-let lastElu = performance.eventLoopUtilization();
+let shuttingDown = false;
 
 const server = http.createServer(
 	async (req: IncomingMessage, res: ServerResponse) => {
@@ -155,6 +171,7 @@ const server = http.createServer(
 			if (req.method === "GET" && pathname === "/health") {
 				sendJson(res, 200, {
 					status: "ok",
+					version: config.appVersion,
 					uptimeSec: Math.round(process.uptime()),
 					rooms: roomManager.listRooms().length,
 					rssBytes: process.memoryUsage().rss,
@@ -162,13 +179,38 @@ const server = http.createServer(
 				return;
 			}
 
+			if (req.method === "GET" && pathname === "/ready") {
+				if (shuttingDown) {
+					sendJson(res, 503, { ready: false, reason: "shutting_down" });
+				} else {
+					sendJson(res, 200, { ready: true, version: config.appVersion });
+				}
+				return;
+			}
+
+			if (req.method === "GET" && pathname === "/metrics") {
+				const roomStats = roomManager.getStats();
+				metrics.activeRooms.set(roomStats.length);
+				for (const r of roomStats) {
+					metrics.tickDurationMs.observe(r.p99DurationMs);
+				}
+				metrics.sampleRuntime();
+				const promBody = await metrics.registry.metrics();
+				res.writeHead(200, {
+					"Content-Type": metrics.registry.contentType,
+					"Content-Length": Buffer.byteLength(promBody),
+				});
+				res.end(promBody);
+				return;
+			}
+
 			if (req.method === "GET" && pathname === "/api/stats") {
-				const currentElu = performance.eventLoopUtilization(lastElu);
-				lastElu = performance.eventLoopUtilization();
+				const runtime = metrics.sampleRuntime();
 				sendJson(res, 200, {
+					version: config.appVersion,
 					uptimeSec: Math.round(process.uptime()),
-					rssMb: Number((process.memoryUsage().rss / (1024 * 1024)).toFixed(1)),
-					eventLoopUtilization: Number(currentElu.utilization.toFixed(4)),
+					rssMb: runtime.rssMb,
+					eventLoopUtilization: Number(runtime.elu.toFixed(4)),
 					rooms: roomManager.getStats(),
 				});
 				return;
@@ -189,6 +231,7 @@ const server = http.createServer(
 					return;
 				}
 				const room = roomManager.createRoom(parsed.data);
+				logger.info({ roomId: room.id }, "room.created");
 				sendJson(res, 201, room.toSummary());
 				return;
 			}
@@ -227,17 +270,6 @@ const server = http.createServer(
 				return;
 			}
 
-			if (req.method === "GET" && pathname === "/api/slow") {
-				const start = performance.now();
-				while (performance.now() - start < 300) {
-					// Діагностичне блокування Event Loop на 300 мс
-				}
-				sendJson(res, 200, {
-					blockedMs: Math.round(performance.now() - start),
-				});
-				return;
-			}
-
 			if (req.method === "GET") {
 				await serveStatic(config.clientDistDir, pathname, res);
 				return;
@@ -255,29 +287,44 @@ const server = http.createServer(
 	},
 );
 
-const wsControl = attachWebSocketServer({ server, roomManager, config });
+const wsControl = attachWebSocketServer({
+	server,
+	roomManager,
+	config,
+	logger,
+	metrics,
+});
 
 server.listen(config.port, config.host, () => {
-	console.log(
-		`[JSTanks Server TS] Authoritative 30Hz server on http://${config.host}:${config.port}`,
+	logger.info(
+		{
+			host: config.host,
+			port: config.port,
+			version: config.appVersion,
+		},
+		"server.listening",
 	);
 });
 
-let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
 	if (shuttingDown) return;
 	shuttingDown = true;
-	console.log(
-		`\n[JSTanks Server TS] Received ${signal}. Starting graceful shutdown...`,
-	);
+	logger.info({ signal }, "server.shutdown_start");
+
+	const forceTimer = setTimeout(() => {
+		logger.error("server.shutdown_forced_timeout");
+		process.exit(1);
+	}, 8000);
+	forceTimer.unref();
 
 	await wsControl.close();
 	await new Promise<void>((resolve) => server.close(() => resolve()));
 	await roomManager.closeAll();
 
-	console.log(
-		"[JSTanks Server TS] All sockets closed and match logs flushed. Exiting 0.",
-	);
+	logger.info("server.shutdown_complete");
+	if (typeof logger.flush === "function") {
+		logger.flush();
+	}
 	process.exit(0);
 }
 

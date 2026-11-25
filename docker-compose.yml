@@ -1,0 +1,15 @@
+services:
+  jstanks:
+    build:
+      context: .
+      args:
+        GIT_SHA: lab-08
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      LOG_LEVEL: info
+      ALLOWED_ORIGINS: "*"
+      MAX_CONNECTIONS_PER_IP: 10
+    restart: unless-stopped

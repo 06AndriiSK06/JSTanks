@@ -4,12 +4,25 @@
 	"version": "0.2.0",
 	"type": "module",
 	"exports": {
-		".": "./src/index.ts",
-		"./sim": "./src/sim/index.ts",
-		"./protocol": "./src/protocol.ts",
-		"./codec": "./src/codec/binary.ts"
+		".": {
+			"types": "./src/index.ts",
+			"default": "./dist/index.js"
+		},
+		"./sim": {
+			"types": "./src/sim/index.ts",
+			"default": "./dist/sim/index.js"
+		},
+		"./protocol": {
+			"types": "./src/protocol.ts",
+			"default": "./dist/protocol.js"
+		},
+		"./codec": {
+			"types": "./src/codec/binary.ts",
+			"default": "./dist/codec/binary.js"
+		}
 	},
 	"scripts": {
+		"build": "tsc -p tsconfig.build.json",
 		"typecheck": "tsc --noEmit -p tsconfig.json"
 	},
 	"dependencies": {

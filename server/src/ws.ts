@@ -1,4 +1,4 @@
-﻿import { randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type http from "node:http";
 import {
 	decodeInputBinary,
@@ -8,10 +8,13 @@ import {
 } from "@jstanks/shared";
 import { type RawData, WebSocket, WebSocketServer } from "ws";
 import type { ServerConfig } from "./config.js";
+import type { Logger } from "./logger.js";
+import type { ServerMetrics } from "./metrics.js";
 import type { Room, RoomManager, RoomPlayer } from "./rooms.js";
 
 interface SocketSessionState {
 	readonly id: string;
+	readonly ip: string;
 	player: RoomPlayer | null;
 	room: Room | null;
 	tokens: number;
@@ -46,17 +49,54 @@ function rawDataToUint8Array(raw: RawData): Uint8Array {
 	);
 }
 
+function extractIp(req: http.IncomingMessage): string {
+	const xff = req.headers["x-forwarded-for"];
+	if (typeof xff === "string" && xff.length > 0) {
+		return xff.split(",")[0]?.trim() ?? "unknown";
+	}
+	return req.socket.remoteAddress ?? "unknown";
+}
+
+function isOriginAllowed(
+	origin: string | undefined,
+	allowed: string[] | "*",
+): boolean {
+	if (allowed === "*") return true;
+	if (!origin) return false;
+	return allowed.includes(origin);
+}
+
 export function attachWebSocketServer(params: {
 	server: http.Server;
 	roomManager: RoomManager;
 	config: ServerConfig;
+	logger?: Logger;
+	metrics?: ServerMetrics;
 }): { wss: WebSocketServer; close: () => Promise<void> } {
-	const { server, roomManager, config } = params;
+	const { server, roomManager, config, logger, metrics } = params;
+	const connectionsByIp = new Map<string, number>();
 
 	const wss = new WebSocketServer({
 		server,
 		path: "/ws",
 		maxPayload: config.maxPayloadBytes,
+		verifyClient: ({ origin, req }, done) => {
+			if (!isOriginAllowed(origin, config.allowedOrigins)) {
+				metrics?.rejectionsTotal.inc({ reason: "invalid_origin" });
+				logger?.warn({ origin }, "ws.rejected");
+				done(false, 403, "Forbidden Origin");
+				return;
+			}
+			const ip = extractIp(req);
+			const active = connectionsByIp.get(ip) ?? 0;
+			if (active >= config.maxConnectionsPerIp) {
+				metrics?.rejectionsTotal.inc({ reason: "ip_limit" });
+				logger?.warn({ ip, active }, "ws.rejected");
+				done(false, 429, "Too Many Connections");
+				return;
+			}
+			done(true);
+		},
 	});
 
 	const socketStates = new WeakMap<WebSocket, SocketSessionState>();
@@ -82,8 +122,16 @@ export function attachWebSocketServer(params: {
 	}
 
 	wss.on("error", (err: unknown) => {
-		console.error("[WSS error]", err);
+		logger?.error({ err }, "wss.error");
 	});
+
+	function recordOutbound(data: string | ArrayBuffer): void {
+		if (!metrics) return;
+		const byteLen =
+			typeof data === "string" ? Buffer.byteLength(data) : data.byteLength;
+		metrics.messagesTotal.inc({ direction: "out" });
+		metrics.bytesTotal.inc({ direction: "out" }, byteLen);
+	}
 
 	function safeSend(
 		socket: WebSocket,
@@ -97,6 +145,7 @@ export function attachWebSocketServer(params: {
 			return false;
 		}
 		if (socket.bufferedAmount > config.bufferedAmountLimitBytes * 4) {
+			metrics?.rejectionsTotal.inc({ reason: "slow_client" });
 			socket.close(1008, "Client too slow (send buffer overflow)");
 			return false;
 		}
@@ -106,10 +155,12 @@ export function attachWebSocketServer(params: {
 			(netSim.latencyMs === 0 && netSim.jitterMs === 0 && netSim.dropRate === 0)
 		) {
 			socket.send(data);
+			recordOutbound(data);
 		} else {
 			deliverWithNetSim(() => {
 				if (socket.readyState === WebSocket.OPEN) {
 					socket.send(data);
+					recordOutbound(data);
 				}
 			}, critical);
 		}
@@ -146,9 +197,14 @@ export function attachWebSocketServer(params: {
 		});
 	}
 
-	wss.on("connection", (socket: WebSocket) => {
+	wss.on("connection", (socket: WebSocket, req: http.IncomingMessage) => {
+		const ip = extractIp(req);
+		connectionsByIp.set(ip, (connectionsByIp.get(ip) ?? 0) + 1);
+		metrics?.connectedPlayers.inc();
+
 		const state: SocketSessionState = {
 			id: randomUUID().slice(0, 8),
+			ip,
 			player: null,
 			room: null,
 			tokens: 90,
@@ -156,9 +212,10 @@ export function attachWebSocketServer(params: {
 			missedPongs: 0,
 		};
 		socketStates.set(socket, state);
+		logger?.info({ playerId: state.id, ip }, "ws.connected");
 
 		socket.on("error", (err: Error) => {
-			console.error(`[WS socket ${state.id} error]`, err.message);
+			logger?.warn({ playerId: state.id, err: err.message }, "ws.socket_error");
 		});
 
 		socket.on("pong", () => {
@@ -167,17 +224,32 @@ export function attachWebSocketServer(params: {
 
 		const joinDeadline = setTimeout(() => {
 			if (!state.player && socket.readyState === WebSocket.OPEN) {
+				metrics?.rejectionsTotal.inc({ reason: "join_timeout" });
+				logger?.warn({ playerId: state.id }, "ws.join_timeout");
 				socket.close(1008, "Join handshake timeout (5s)");
 			}
 		}, config.joinTimeoutMs);
 
 		socket.on("message", (raw: RawData, isBinary: boolean) => {
+			const byteLen = Buffer.isBuffer(raw)
+				? raw.byteLength
+				: raw instanceof ArrayBuffer
+					? raw.byteLength
+					: Buffer.concat(raw).byteLength;
+			metrics?.messagesTotal.inc({ direction: "in" });
+			metrics?.bytesTotal.inc({ direction: "in" }, byteLen);
+
 			const now = Date.now();
 			const elapsedSec = (now - state.lastRefill) / 1000;
 			state.tokens = Math.min(90, state.tokens + elapsedSec * 60);
 			state.lastRefill = now;
 
 			if (state.tokens < 1) {
+				metrics?.rejectionsTotal.inc({ reason: "rate_limit" });
+				logger?.warn(
+					{ playerId: state.id, roomId: state.room?.id },
+					"ws.rate_limit",
+				);
 				socket.close(1008, "Rate limit exceeded");
 				return;
 			}
@@ -195,7 +267,11 @@ export function attachWebSocketServer(params: {
 				} catch (err: unknown) {
 					const msg =
 						err instanceof Error ? err.message : "Invalid binary frame";
-					console.warn(`[WS ${state.id}] ${msg}`);
+					metrics?.rejectionsTotal.inc({ reason: "malformed_binary" });
+					logger?.warn(
+						{ playerId: state.id, roomId: state.room?.id, reason: msg },
+						"ws.malformed_frame",
+					);
 					socket.close(1007, msg);
 				}
 				return;
@@ -204,7 +280,11 @@ export function attachWebSocketServer(params: {
 			const rawText = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
 			const parsed = parseClientMessage(rawText);
 			if (!parsed.ok) {
-				console.warn(`[WS ${state.id}] Rejected message: ${parsed.reason}`);
+				metrics?.rejectionsTotal.inc({ reason: "malformed_json" });
+				logger?.warn(
+					{ playerId: state.id, roomId: state.room?.id, reason: parsed.reason },
+					"ws.malformed_frame",
+				);
 				socket.close(parsed.code, parsed.reason);
 				return;
 			}
@@ -252,9 +332,11 @@ export function attachWebSocketServer(params: {
 					if (!room) {
 						try {
 							room = roomManager.createRoom({ id: msg.room, name: msg.room });
+							logger?.info({ roomId: room.id }, "room.created");
 						} catch (err: unknown) {
 							const reason =
 								err instanceof Error ? err.message : "Cannot create room";
+							metrics?.rejectionsTotal.inc({ reason: "room_limit" });
 							socket.close(1013, reason);
 							return;
 						}
@@ -271,6 +353,7 @@ export function attachWebSocketServer(params: {
 					});
 
 					if (!joined) {
+						metrics?.rejectionsTotal.inc({ reason: "room_full" });
 						socket.close(1013, "Room is full");
 						return;
 					}
@@ -278,6 +361,10 @@ export function attachWebSocketServer(params: {
 					clearTimeout(joinDeadline);
 					state.player = joined;
 					state.room = room;
+					logger?.info(
+						{ playerId: joined.id, roomId: room.id },
+						"player.joined",
+					);
 
 					safeSend(
 						socket,
@@ -327,11 +414,20 @@ export function attachWebSocketServer(params: {
 
 		socket.on("close", () => {
 			clearTimeout(joinDeadline);
+			metrics?.connectedPlayers.dec();
+			const cur = connectionsByIp.get(state.ip) ?? 1;
+			if (cur <= 1) {
+				connectionsByIp.delete(state.ip);
+			} else {
+				connectionsByIp.set(state.ip, cur - 1);
+			}
+
 			if (state.player && state.room) {
 				const { player, room } = state;
 				state.player = null;
 				state.room = null;
 				room.leave(player.id);
+				logger?.info({ playerId: player.id, roomId: room.id }, "player.left");
 				broadcastRoom(
 					room,
 					encodeJsonServerMsg("roster", {
@@ -362,7 +458,13 @@ export function attachWebSocketServer(params: {
 		wss,
 		async close(): Promise<void> {
 			clearInterval(heartbeat);
+			const shutdownNotice = encodeJsonServerMsg("shutdown", {
+				message: "Server shutting down",
+			});
 			for (const client of wss.clients) {
+				if (client.readyState === WebSocket.OPEN) {
+					client.send(shutdownNotice);
+				}
 				client.close(1001, "Server shutting down");
 			}
 			await new Promise<void>((resolve) => wss.close(() => resolve()));

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <title>JSTanks</title>
+  <rect width="512" height="512" rx="96" fill="#090d16"/>
+  <polygon points="256,72 404,412 256,336 108,412" fill="#38bdf8" stroke="#e0f2fe" stroke-width="14"/>
+  <circle cx="256" cy="248" r="34" fill="#0f4c81"/>
+</svg>
